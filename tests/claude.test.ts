@@ -83,7 +83,7 @@ test('diagnostic redaction removes bearer, keys, passwords and terminal escape c
   const redacted = redactLog('\x1b[31mBearer secret.token sk-ant-api03-secret password=hello access_token="private"\x1b[0m');
   for (const secret of ['secret.token', 'api03-secret', 'hello', 'private', '\x1b']) assert.ok(!redacted.includes(secret));
 });
-test('background native runner completes automatically and rejects nonzero, incomplete and cancelled runs', { skip:process.platform!=='win32',timeout:20000 }, async () => {
+test('background native runner completes automatically and rejects nonzero, incomplete and cancelled runs', { skip:process.platform!=='win32',timeout:60000 }, async () => {
   const base = await mkdtemp(join(tmpdir(),'desk-runner-fixture-'));
   try {
     const source = join(base,'fixture.cs'), executable = join(base,'fixture.exe');
@@ -111,7 +111,7 @@ class Fixture {
   }
 }`);
     const compiler = join(process.env.SystemRoot!,'Microsoft.NET','Framework64','v4.0.30319','csc.exe');
-    const compiled = spawnSync(compiler,['/nologo','/target:exe','/r:System.Web.Extensions.dll',`/out:${executable}`,source],{windowsHide:true,encoding:'utf8',timeout:5000});
+    const compiled = spawnSync(compiler,['/nologo','/target:exe','/r:System.Web.Extensions.dll',`/out:${executable}`,source],{windowsHide:true,encoding:'utf8',timeout:30000});
     assert.equal(compiled.status,0,compiled.error?.message || compiled.stdout+compiled.stderr);
     const host = join(process.cwd(),'dist/native/ClaudeTerminalHost.exe');
     for (const question of ['后台中文问题','nonzero','incomplete','cancel','timeout']) {

@@ -3,6 +3,7 @@ name: Build Windows package
 on:
   push:
     branches: [main]
+    tags: ['v*.*.*']
   workflow_dispatch:
 
 permissions:
@@ -10,10 +11,26 @@ permissions:
 
 jobs:
   package:
+    permissions:
+      contents: read
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Tagged releases require a stable X.Y.Z package version, got $version."
+          }
+          if ($env:RELEASE_TAG -ne "v$version") {
+            throw "Tag $env:RELEASE_TAG does not match package.json version $version."
+          }
 
       - uses: actions/setup-node@v4
         with:
@@ -33,9 +50,56 @@ jobs:
       - run: npm test
       - run: node scripts/build-release.mjs
 
-      - uses: actions/upload-artifact@v4
+      - name: Package versioned release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $zip = "release-assets/claude-business-desk-$env:RELEASE_TAG-win-x64.zip"
+          Compress-Archive -Path release/* -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $name = Split-Path $zip -Leaf
+          "$hash  $name" | Set-Content "$zip.sha256" -Encoding ascii
+
+      - name: Upload main build
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
         with:
           name: claude-business-desk-win-x64-${{ github.sha }}
           path: release/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-business-desk-${{ github.ref_name }}-win-x64
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@v4
+        with:
+          name: claude-business-desk-${{ github.ref_name }}-win-x64
+          path: release-assets
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $files = Get-ChildItem release-assets -File | ForEach-Object FullName
+          gh release create $env:RELEASE_TAG $files --verify-tag --notes-from-tag --title "Claude Business Desk $env:RELEASE_TAG"

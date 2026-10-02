@@ -1,11 +1,12 @@
 # Windows 部署、安全与备份
 
-## 交付状态
+## 构建与交付
 
-- 脚本现在可用；服务源码和依赖完整后执行 `npm install`、`npm run build`、`scripts\启动.cmd`。本文不要求在服务不存在时启动。
-- 当前 Node 为 22.22；经用户批准已安装 .NET 8 SDK 8.0.425，编译了自包含 WinForms EXE，已实际验证托盘启动后两个网页入口成功响应。完整通知视觉效果、菜单交互和所有进程故障场景仍需桌面验收。
-- `node scripts/build-release.mjs` 在 x64 Windows 上清理旧的服务/网页输出，调用 npm build，并在空 staging 中全新发布 Claude 原生宿主与托盘启动器，再复制 Node 和完整依赖。需要 .NET 8 SDK；生成目标为 win-x64，成功后才替换 `release`，上一版保留为 `release-backup`。
-- 支持后台自动处理和可见 Claude 终端两种执行方式。问题审核同意后调用本机 Claude，完整成功结果且进程正常退出后进入答案审核；终端模式需要管理员处理权限提示并在本轮完成后输入 `/exit`。管理员同意发布后客户才可读取答案。原有账号、项目、网络配置和历史保留，桌面窗口和其他设备访问须按实际部署环境验收。
+开发和打包需要 Windows x64、Node.js 22.x 与 .NET 8 SDK。安装依赖后可运行 `npm run build` 构建服务和网页，运行 `scripts\启动.cmd` 启动开发构建。
+
+`node scripts/build-release.mjs` 会清理旧的服务和网页输出，在空的 `release-staging` 中重新发布 Claude 原生宿主与托盘启动器，并复制发行所需的 Node.js 运行时和依赖。目标平台为 win-x64；所有关键文件验证成功后才替换 `release`，上一版保留为 `release-backup`。发行包不得包含数据目录、`.env`、数据库、token、日志或 Claude 登录凭证。
+
+系统支持后台自动处理和可见 Claude 终端两种执行方式。问题审核同意后才调用本机 Claude；只有完整成功结果且进程正常退出才进入答案审核，终端模式还要求管理员处理权限提示并在本轮完成后输入 `/exit`。客户只有在管理员同意发布后才能读取答案。升级保留账号、项目、网络配置和历史；独立窗口、Windows 通知和其他设备访问仍应在实际部署环境中验收。
 
 ## 数据与网络
 

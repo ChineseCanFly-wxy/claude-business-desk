@@ -18,8 +18,15 @@ const run = (command, args, label) => {
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${label} failed (${result.status}).`);
 };
+const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+const versionMatch = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(pkg.version);
+if (!versionMatch) throw new Error(`package.json contains an invalid semantic version: ${pkg.version}`);
+const fileVersion = `${versionMatch.slice(1, 4).join('.')}.0`;
+const dotnetVersion = [`-p:Version=${pkg.version}`, `-p:AssemblyVersion=${fileVersion}`, `-p:FileVersion=${fileVersion}`, `-p:InformationalVersion=${pkg.version}`, '-p:IncludeSourceRevisionInInformationalVersion=false'];
+const releaseDocuments = ['README.md', 'CHANGELOG.md', 'LICENSE', 'docs/deployment.md', 'docs/RELEASING.md'];
 if (!(await exists(path.join(root, 'apps/server/src/main.ts')))) throw new Error('Server source is not ready. Packaging does not run until apps/server/src/main.ts exists.');
 if (!(await exists(path.join(root, 'node_modules')))) throw new Error('Run npm install in the source checkout first.');
+for (const document of releaseDocuments) if (!(await exists(path.join(root, document)))) throw new Error(`Release documentation is missing: ${document}`);
 if (process.platform !== 'win32') throw new Error('Build this Windows release on Windows so runtime/node.exe and native dependencies match.');
 if (process.arch !== 'x64') throw new Error(`This release targets win-x64, not ${process.arch}.`);
 const dist = path.join(root, 'dist');
@@ -39,17 +46,16 @@ await rm(staging, { recursive: true, force: true });
 await mkdir(path.join(staging, 'runtime'), { recursive: true });
 await cp(process.execPath, path.join(staging, 'runtime/node.exe'));
 for (const name of ['server', 'web']) await cp(path.join(root, 'dist', name), path.join(staging, 'dist', name), { recursive: true });
-run('dotnet', ['publish', 'apps/native-host/ClaudeTerminalHost.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-p:PublishSingleFile=true', '-o', path.join(staging, 'dist/native')], 'native host publish');
-run('dotnet', ['publish', 'apps/launcher/ClaudeBusinessDesk.Launcher.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-o', staging], 'launcher publish');
+run('dotnet', ['publish', 'apps/native-host/ClaudeTerminalHost.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-p:PublishSingleFile=true', ...dotnetVersion, '-o', path.join(staging, 'dist/native')], 'native host publish');
+run('dotnet', ['publish', 'apps/launcher/ClaudeBusinessDesk.Launcher.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', ...dotnetVersion, '-o', staging], 'launcher publish');
 // Copy the complete dependency tree, including native bindings and transitive dependencies.
 await cp(path.join(root, 'node_modules'), path.join(staging, 'node_modules'), { recursive: true, dereference: true });
-const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 await writeFile(path.join(staging, 'package.json'), JSON.stringify({ name: pkg.name, version: pkg.version, private: true, type: pkg.type ?? 'module' }, null, 2));
 await mkdir(path.join(staging, 'scripts'), { recursive: true });
 for (const name of ['启动.cmd', 'start.ps1']) await cp(path.join(root, 'scripts', name), path.join(staging, 'scripts', name));
-await cp(path.join(root, 'README.md'), path.join(staging, 'README.md'));
-if (await exists(path.join(root, 'docs'))) await cp(path.join(root, 'docs'), path.join(staging, 'docs'), { recursive: true });
-for (const artifact of ['runtime/node.exe', 'dist/server/main.js', 'dist/web/index.html', 'dist/native/ClaudeTerminalHost.exe', 'ClaudeBusinessDesk.Launcher.exe']) {
+for (const name of ['README.md', 'CHANGELOG.md', 'LICENSE']) await cp(path.join(root, name), path.join(staging, name));
+await cp(path.join(root, 'docs'), path.join(staging, 'docs'), { recursive: true });
+for (const artifact of ['runtime/node.exe', 'dist/server/main.js', 'dist/web/index.html', 'dist/native/ClaudeTerminalHost.exe', 'ClaudeBusinessDesk.Launcher.exe', ...releaseDocuments]) {
   if (!(await exists(path.join(staging, artifact)))) throw new Error(`Incomplete staged release. Missing: ${artifact}`);
 }
 
