@@ -1,0 +1,41 @@
+name: Build Windows package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+          cache: npm
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.425
+
+      - run: npm ci
+      - run: npm run typecheck
+
+      - name: Build native test host
+        run: dotnet publish apps/native-host/ClaudeTerminalHost.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/native
+
+      - run: npm test
+      - run: node scripts/build-release.mjs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-business-desk-win-x64-${{ github.sha }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
