@@ -1,0 +1,73 @@
+name: Verify published Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable Release tag to download and verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Validate stable release tag
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'Select a stable vX.Y.Z Release.' }
+
+      - name: Check out the exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Download and verify official ZIP and SHA-256
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $release = gh release view $env:RELEASE_TAG --json tagName,isDraft,isPrerelease,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $release.isDraft -or $release.isPrerelease -or $release.tagName -ne $env:RELEASE_TAG) { throw 'Official stable Release is missing.' }
+          $name = "claude-business-desk-$env:RELEASE_TAG-win-x64.zip"
+          New-Item -ItemType Directory downloaded-release | Out-Null
+          gh release download $env:RELEASE_TAG --pattern "$name*" --dir downloaded-release
+          if ($LASTEXITCODE -ne 0) { throw 'Official Release download failed.' }
+          $zip = Join-Path (Resolve-Path downloaded-release).Path $name
+          $line = (Get-Content -LiteralPath "$zip.sha256" -Raw).Trim()
+          $checksum = [regex]::Match($line, '^([a-f0-9]{64})  (.+)$')
+          if (-not $checksum.Success -or $checksum.Groups[2].Value -ne $name) { throw 'Invalid checksum file.' }
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $checksum.Groups[1].Value) { throw 'Downloaded SHA-256 mismatch.' }
+          Write-Output "Official download SHA-256: $actual"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [IO.Compression.ZipFile]::ExtractToDirectory($zip, [IO.Path]::GetFullPath('downloaded-package'))
+
+      - name: Check extracted package with its bundled runtime
+        shell: pwsh
+        run: |
+          & .\downloaded-package\runtime\node.exe scripts/verify-release.mjs downloaded-package
+          if ($LASTEXITCODE -ne 0) { throw 'Extracted package integrity failed.' }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $launcher = Get-Item downloaded-package/ClaudeBusinessDesk.Launcher.exe
+          if ($launcher.VersionInfo.ProductVersion -ne $version -or $launcher.VersionInfo.FileVersion -ne "$version.0") { throw 'Downloaded EXE version mismatch.' }
+          .\scripts\check-notifications.ps1 -Launcher $launcher.FullName
+
+      - name: Check extracted native execution and concurrent transcript writes
+        shell: pwsh
+        run: |
+          $env:CLAUDE_DESK_NATIVE_HOST = (Resolve-Path downloaded-package/dist/native/ClaudeTerminalHost.exe).Path
+          & .\downloaded-package\runtime\node.exe downloaded-package/node_modules/tsx/dist/cli.mjs scripts/native-smoke.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Downloaded native execution failed.' }
+
+      - name: Actually start extracted EXE and verify both portals
+        shell: pwsh
+        run: .\scripts\smoke-release.ps1 -Launcher .\downloaded-package\ClaudeBusinessDesk.Launcher.exe
