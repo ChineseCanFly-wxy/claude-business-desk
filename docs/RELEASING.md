@@ -41,6 +41,7 @@ npm run typecheck
 dotnet publish apps/native-host/ClaudeTerminalHost.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/native
 npm test
 node scripts/build-release.mjs
+node scripts/verify-release.mjs
 .\scripts\check-notifications.ps1 -Launcher .\release\ClaudeBusinessDesk.Launcher.exe
 npx tsx scripts/native-smoke.ts
 ```
@@ -63,7 +64,7 @@ git commit -m "Release v$version"
 git push origin main
 ```
 
-确认 `Build Windows package` 的 `main` 构建成功。失败时在 `main` 上修复、重新验证并推送；不要用标签绕过失败的分支构建。
+确认 `Build Windows package` 的 `main` 构建成功，包括干净 Windows 主机上的 `scripts/smoke-release.ps1` 启动验收：实际启动打包后的 EXE，使用临时数据检查自带 Node、管理端、客户入口及网页资源，再停止测试进程。本机已有工作台运行时不要为此中断服务；GitHub 的干净主机承担这项验证。失败时在 `main` 上修复、重新验证并推送；不要用标签绕过失败的分支构建。
 
 ## 5. 创建并推送标签
 

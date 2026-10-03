@@ -3,12 +3,13 @@ export type Project = { id: string; name: string; description: string; path?: st
 export type Status = 'pending_question_review' | 'queued' | 'running' | 'pending_answer_review' | 'answered' | 'rejected' | 'failed' | 'cancelled';
 export type Question = { conversationId: string; turnIndex: number; parentQuestionId?: string | null; id: string; projectId: string; projectName: string; username: string; question: string; status: Status; answer?: string; draftAnswer?: string; error?: string; createdAt: string; updatedAt: string; archived: boolean };
 export type ContextSnapshot = { formatVersion: 1; sourceIds: string[]; turns: { questionId: string; turnIndex: number; question: string; answer: string }[] };
-export type ConversationSummary = { id: string; projectId: string; projectName: string; username: string; title: string; latestTurnId: string; createdAt: string; updatedAt: string; status: Status; turnCount: number; archived: boolean };
+export type ConversationTurnPreview = Pick<Question, 'id' | 'turnIndex' | 'question' | 'status'>;
+export type ConversationSummary = { id: string; projectId: string; projectName: string; username: string; title: string; titleTurnIndex: number; latestQuestion: string; latestVisibleTurnIndex: number; followupCount: number; turnPreviews: ConversationTurnPreview[]; latestTurnId: string; createdAt: string; updatedAt: string; status: Status; turnCount: number; archived: boolean };
 export type ConversationPage = { items: ConversationSummary[]; total: number; page: number };
 export type Conversation = ConversationSummary & { questions: Question[] };
 export type Detail = Question & { contextSnapshot?: ContextSnapshot };
 export type Page = { items: Question[]; total: number; page: number };
-export type Settings = { claudePath: string; mode: 'hidden' | 'visible'; timeoutSeconds: number; clientHost: string; clientPort: number; adminPort: number; allowInsecureLan: boolean; adminNotificationMode?: 'window' | 'notification'; extraPrompt: string; clientError?: string };
+export type Settings = { claudePath: string; mode: 'hidden' | 'visible'; timeoutSeconds: number; clientHost: string; clientPort: number; adminPort: number; allowInsecureLan: boolean; adminNotificationMode?: 'window' | 'notification'; fixedPrompt: string; extraPrompt: string; clientError?: string };
 export type Stats = { pendingQuestions: number; pendingAnswers: number; running: number; total: number; queued: number };
 let csrf = '';
 export function setCsrf(token?: string) { csrf = token || ''; }
@@ -22,4 +23,4 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
   return data as T;
 }
 export const statusLabels: Record<Status, string> = { pending_question_review: '等待问题审核', queued: '排队中', running: '正在处理', pending_answer_review: '等待答案审核', answered: '已答复', rejected: '已拒绝', failed: '处理失败', cancelled: '已取消' };
-export const unfinished = (q: Question) => ['pending_question_review', 'queued', 'running', 'pending_answer_review'].includes(q.status);
+export const unfinished = (q: Pick<Question, 'status'>) => ['pending_question_review', 'queued', 'running', 'pending_answer_review'].includes(q.status);

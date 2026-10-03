@@ -44,9 +44,14 @@ export class Service {
       const settings = this.store.settings();
       const snapshot = contextSnapshotSchema.parse(JSON.parse(q.context_snapshot));
       const input = renderQuestionInput(q.question, snapshot);
-      this.store.db.prepare('UPDATE runs SET input_snapshot=? WHERE id=?').run(JSON.stringify({ formatVersion: 1, question: input, inputSha256: createHash('sha256').update(JSON.stringify({ question: input, systemPrompt: buildBusinessPrompt(settings.extraPrompt) })).digest('hex'), contextSnapshot: snapshot, systemPrompt: buildBusinessPrompt(settings.extraPrompt), extraPrompt: settings.extraPrompt, claudePath: settings.claudePath, mode: settings.mode }), id);
-      validatePromptInput(input, settings.extraPrompt, settings.claudePath);
-      const result = await this.executor({ claudePath: settings.claudePath, projectPath: q.path, question: input, extraPrompt: settings.extraPrompt, mode: settings.mode, timeoutSeconds: settings.timeoutSeconds, signal: controller.signal, onLog: text => {
+      const conversation = this.store.db.prepare('SELECT claude_session_id,claude_session_path FROM conversations WHERE id=? AND user_id=? AND project_id=?').get(q.conversation_id, q.user_id, q.project_id) as any;
+      const resumeSessionId = conversation?.claude_session_path === q.path ? conversation.claude_session_id ?? undefined : undefined;
+      // An execution mutates the CLI transcript. Only publication marks it reusable again;
+      // interrupted, cancelled or rejected runs must not enter the next approved turn.
+      this.store.db.prepare('UPDATE conversations SET claude_session_id=NULL,claude_session_path=NULL WHERE id=?').run(q.conversation_id);
+      this.store.db.prepare('UPDATE runs SET input_snapshot=? WHERE id=?').run(JSON.stringify({ formatVersion: 1, question: input, inputSha256: createHash('sha256').update(JSON.stringify({ question: input, systemPrompt: buildBusinessPrompt(settings.extraPrompt, settings.fixedPrompt) })).digest('hex'), contextSnapshot: snapshot, projectPath: q.path, resumeSessionId: resumeSessionId ?? null, systemPrompt: buildBusinessPrompt(settings.extraPrompt, settings.fixedPrompt), fixedPrompt: settings.fixedPrompt, extraPrompt: settings.extraPrompt, claudePath: settings.claudePath, mode: settings.mode }), id);
+      validatePromptInput(input, settings.extraPrompt, settings.claudePath, settings.fixedPrompt);
+      const result = await this.executor({ claudePath: settings.claudePath, projectPath: q.path, question: input, fixedPrompt: settings.fixedPrompt, extraPrompt: settings.extraPrompt, mode: settings.mode, resumeSessionId, timeoutSeconds: settings.timeoutSeconds, signal: controller.signal, onLog: text => {
         logs = (logs + text + '\n').slice(-200_000);
         if (Date.now() - lastWrite > 500) { flush(); lastWrite = Date.now(); }
       } });

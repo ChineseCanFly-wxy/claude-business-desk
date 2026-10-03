@@ -49,6 +49,19 @@ jobs:
 
       - run: npm test
       - run: node scripts/build-release.mjs
+      - run: node scripts/verify-release.mjs
+
+      - name: Check packaged launcher
+        run: .\scripts\check-notifications.ps1 -Launcher .\release\ClaudeBusinessDesk.Launcher.exe
+
+      - name: Check packaged native execution
+        shell: pwsh
+        run: |
+          $env:CLAUDE_DESK_NATIVE_HOST = (Resolve-Path release/dist/native/ClaudeTerminalHost.exe).Path
+          npx tsx scripts/native-smoke.ts
+
+      - name: Check packaged startup on a clean Windows host
+        run: .\scripts\smoke-release.ps1 -Launcher .\release\ClaudeBusinessDesk.Launcher.exe
 
       - name: Package versioned release
         if: startsWith(github.ref, 'refs/tags/')
@@ -58,7 +71,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force release-assets | Out-Null
           $zip = "release-assets/claude-business-desk-$env:RELEASE_TAG-win-x64.zip"
-          Compress-Archive -Path release/* -DestinationPath $zip -CompressionLevel Optimal
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [IO.Compression.ZipFile]::CreateFromDirectory((Resolve-Path release).Path, [IO.Path]::GetFullPath($zip), [IO.Compression.CompressionLevel]::Optimal, $false)
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           $name = Split-Path $zip -Leaf
           "$hash  $name" | Set-Content "$zip.sha256" -Encoding ascii

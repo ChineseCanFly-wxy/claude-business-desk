@@ -7,14 +7,16 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { backup } from 'node:sqlite';
-import { Store, activeStates } from './store.js';
+import { Store, activeStates, defaultSettings } from './store.js';
 import { Service } from './service.js';
 import { digest, token, hashPassword, verifyPassword } from './auth.js';
 import { probeClaude, buildBusinessPrompt, validatePromptInput } from './claude/runner.js';
+import { validateBusinessAnswer } from './claude/prompt.js';
 import { contextSnapshotSchema, renderQuestionInput } from './context.js';
+import { recordVisibility, registerHistoryRoutes } from './history.js';
 
 const credentials = z.object({ username: z.string().trim().min(2).max(40).regex(/^[\p{L}\p{N}_.-]+$/u), password: z.string().min(1).max(128) });
-const settingsSchema = z.object({ claudePath: z.string().max(500), mode: z.enum(['hidden', 'visible']), timeoutSeconds: z.number().int().min(30).max(1800), clientHost: z.string().ip(), clientPort: z.number().int().min(1024).max(65535), adminPort: z.number().int().min(1024).max(65535), allowInsecureLan: z.boolean(), adminNotificationMode: z.enum(['window', 'notification']).default('window'), extraPrompt: z.string().max(4000) });
+const settingsSchema = z.object({ claudePath: z.string().max(500), mode: z.enum(['hidden', 'visible']), timeoutSeconds: z.number().int().min(30).max(1800), clientHost: z.string().ip(), clientPort: z.number().int().min(1024).max(65535), adminPort: z.number().int().min(1024).max(65535), allowInsecureLan: z.boolean(), adminNotificationMode: z.enum(['window', 'notification']).default('window'), fixedPrompt: z.string().min(1).max(4000).refine(value => !!value.trim() && !value.includes('\0'), '固定业务提示词不能为空或包含空字符').default(defaultSettings.fixedPrompt), extraPrompt: z.string().max(4000) });
 function fail(code: number, message: string): never { throw Object.assign(new Error(message), { statusCode: code }); }
 const usernameOf = (request: FastifyRequest) => (request as any).user as any;
 function projectPath(path: string) {
@@ -103,7 +105,7 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
     ? store.db.prepare('SELECT id,name,description,path,enabled FROM projects ORDER BY name').all().map((p: any) => ({ ...p, enabled: !!p.enabled }))
     : store.db.prepare('SELECT p.id,p.name,p.description,p.enabled FROM projects p JOIN grants g ON g.project_id=p.id WHERE g.user_id=? AND p.enabled=1 ORDER BY name').all(usernameOf(request).id).map((p: any) => ({ ...p, enabled: true })));
   function getQuestion(id: string, request: FastifyRequest) {
-    const row = store.db.prepare('SELECT q.*,p.name project_name,u.username FROM questions q JOIN projects p ON p.id=q.project_id JOIN users u ON u.id=q.user_id WHERE q.id=?').get(id) as any;
+    const row = store.db.prepare(`SELECT q.*,p.name project_name,u.username FROM questions q JOIN projects p ON p.id=q.project_id JOIN users u ON u.id=q.user_id WHERE q.id=? AND ${recordVisibility()}`).get(id, usernameOf(request).id) as any;
     if (!row) fail(404, '问题不存在');
     if (portal === 'client' && (row.user_id !== usernameOf(request).id || !store.db.prepare('SELECT 1 FROM grants g JOIN projects p ON p.id=g.project_id WHERE g.user_id=? AND g.project_id=? AND p.enabled=1').get(usernameOf(request).id, row.project_id))) fail(404, '问题不存在');
     return row;
@@ -113,7 +115,7 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
   }
   app.get('/api/questions', async request => {
     const query = z.object({ page: z.coerce.number().int().min(1).max(10000).default(1), status: z.string().max(50).optional() }).parse(request.query);
-    const clauses = [], params: any[] = [];
+    const clauses = [recordVisibility()], params: any[] = [usernameOf(request).id];
     if (portal === 'client') { clauses.push('q.user_id=?'); clauses.push('EXISTS(SELECT 1 FROM grants g JOIN projects ap ON ap.id=g.project_id WHERE g.user_id=q.user_id AND g.project_id=q.project_id AND ap.enabled=1)'); params.push(usernameOf(request).id); }
     if (query.status) { clauses.push('q.status=?'); params.push(query.status); }
     const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
@@ -121,29 +123,44 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
     const rows = store.db.prepare(`SELECT q.*,p.name project_name,u.username FROM questions q JOIN projects p ON p.id=q.project_id JOIN users u ON u.id=q.user_id ${where} ORDER BY q.created_at DESC LIMIT 30 OFFSET ?`).all(...params, (query.page - 1) * 30);
     return { items: rows.map(present), total, page: query.page };
   });
-  const conversationSelect = `SELECT c.*,p.name project_name,u.username,
-    (SELECT question FROM questions WHERE conversation_id=c.id ORDER BY turn_index LIMIT 1) title,
+  registerHistoryRoutes(app, store, service, portal, usernameOf);
+  const visibleQuestions = `WITH visible_questions AS (SELECT * FROM questions q WHERE ${recordVisibility()})`;
+  const conversationSelect = `${visibleQuestions} SELECT c.*,p.name project_name,u.username,
+    (SELECT question FROM visible_questions WHERE conversation_id=c.id ORDER BY turn_index LIMIT 1) title,
+    (SELECT MIN(turn_index) FROM visible_questions WHERE conversation_id=c.id) title_turn_index,
+    (SELECT question FROM visible_questions WHERE conversation_id=c.id ORDER BY turn_index DESC LIMIT 1) latest_question,
+    (SELECT MAX(turn_index) FROM visible_questions WHERE conversation_id=c.id) latest_visible_turn_index,
+    (SELECT COUNT(*) FROM visible_questions WHERE conversation_id=c.id AND turn_index>1) followup_count,
     (SELECT status FROM questions WHERE conversation_id=c.id ORDER BY turn_index DESC LIMIT 1) status,
     (SELECT id FROM questions WHERE conversation_id=c.id ORDER BY turn_index DESC LIMIT 1) latest_turn_id,
-    (SELECT COUNT(*) FROM questions WHERE conversation_id=c.id) turn_count,
-    (SELECT MAX(updated_at) FROM questions WHERE conversation_id=c.id) updated_at,
-    (SELECT MIN(archived) FROM questions WHERE conversation_id=c.id) archived
+    (SELECT COUNT(*) FROM visible_questions WHERE conversation_id=c.id) turn_count,
+    (SELECT MAX(updated_at) FROM visible_questions WHERE conversation_id=c.id) updated_at,
+    (SELECT MIN(archived) FROM visible_questions WHERE conversation_id=c.id) archived
     FROM conversations c JOIN projects p ON p.id=c.project_id JOIN users u ON u.id=c.user_id`;
-  const conversationVisibility = portal === 'client' ? `c.user_id=? AND EXISTS(SELECT 1 FROM grants g JOIN projects ap ON ap.id=g.project_id WHERE g.user_id=c.user_id AND g.project_id=c.project_id AND ap.enabled=1)` : '1=1';
-  const conversationSummary = (row: any) => ({ id: row.id, projectId: row.project_id, projectName: row.project_name, username: row.username, title: row.title, status: row.status, latestTurnId: row.latest_turn_id, turnCount: row.turn_count, createdAt: row.created_at, updatedAt: row.updated_at, archived: !!row.archived });
+  const conversationVisibility = `EXISTS(SELECT 1 FROM visible_questions WHERE conversation_id=c.id) AND ` + (portal === 'client' ? `c.user_id=? AND EXISTS(SELECT 1 FROM grants g JOIN projects ap ON ap.id=g.project_id WHERE g.user_id=c.user_id AND g.project_id=c.project_id AND ap.enabled=1)` : '1=1');
+  const conversationSummary = (row: any, turns: any[] = []) => ({ id: row.id, projectId: row.project_id, projectName: row.project_name, username: row.username, title: row.title, titleTurnIndex: row.title_turn_index, latestQuestion: row.latest_question, latestVisibleTurnIndex: row.latest_visible_turn_index, followupCount: row.followup_count, turnPreviews: turns.map(q => ({ id: q.id, turnIndex: q.turn_index, question: q.question, status: q.status })), status: row.status, latestTurnId: row.latest_turn_id, turnCount: row.turn_count, createdAt: row.created_at, updatedAt: row.updated_at, archived: !!row.archived });
   app.get('/api/conversations', async request => {
-    const query = z.object({ page: z.coerce.number().int().min(1).max(10000).default(1) }).parse(request.query);
-    const params = portal === 'client' ? [usernameOf(request).id] : [];
-    const total = (store.db.prepare(`SELECT COUNT(*) count FROM conversations c WHERE ${conversationVisibility}`).get(...params) as any).count;
-    const rows = store.db.prepare(`${conversationSelect} WHERE ${conversationVisibility} ORDER BY updated_at DESC,c.id LIMIT 30 OFFSET ?`).all(...params, (query.page - 1) * 30);
-    return { items: rows.map(conversationSummary), total, page: query.page };
+    const query = z.object({ page: z.coerce.number().int().min(1).max(10000).default(1), status: z.enum(['', 'pending_question_review', 'queued', 'running', 'pending_answer_review', 'answered', 'rejected', 'failed', 'cancelled']).optional() }).parse(request.query);
+    const params = portal === 'client' ? [usernameOf(request).id, usernameOf(request).id] : [usernameOf(request).id];
+    let visibility = conversationVisibility;
+    if (query.status) { visibility += ' AND (SELECT status FROM questions WHERE conversation_id=c.id ORDER BY turn_index DESC LIMIT 1)=?'; params.push(query.status); }
+    const total = (store.db.prepare(`${visibleQuestions} SELECT COUNT(*) count FROM conversations c WHERE ${visibility}`).get(...params) as any).count;
+    const rows = store.db.prepare(`${conversationSelect} WHERE ${visibility} ORDER BY updated_at DESC,c.id LIMIT 30 OFFSET ?`).all(...params, (query.page - 1) * 30);
+    const turnGroups = new Map<string, any[]>();
+    if (rows.length) {
+      const ids = rows.map((row: any) => row.id);
+      // Fetch each visible turn once for this page; never include deleted text or drafts.
+      const turns = store.db.prepare(`${visibleQuestions} SELECT id,conversation_id,turn_index,question,status FROM visible_questions WHERE conversation_id IN (${ids.map(() => '?').join(',')}) ORDER BY turn_index`).all(usernameOf(request).id, ...ids);
+      for (const turn of turns as any[]) { const group = turnGroups.get(turn.conversation_id) ?? []; group.push(turn); turnGroups.set(turn.conversation_id, group); }
+    }
+    return { items: rows.map((row: any) => conversationSummary(row, turnGroups.get(row.id))), total, page: query.page };
   });
   app.get('/api/conversations/:id', async request => {
-    const params = portal === 'client' ? [usernameOf(request).id] : [];
+    const params = portal === 'client' ? [usernameOf(request).id, usernameOf(request).id] : [usernameOf(request).id];
     const row = store.db.prepare(`${conversationSelect} WHERE ${conversationVisibility} AND c.id=?`).get(...params, (request.params as any).id) as any;
     if (!row) fail(404, '对话不存在');
-    const questions = store.db.prepare('SELECT q.*,p.name project_name,u.username FROM questions q JOIN projects p ON p.id=q.project_id JOIN users u ON u.id=q.user_id WHERE q.conversation_id=? ORDER BY q.turn_index').all(row.id);
-    return { ...conversationSummary(row), questions: questions.map(present) };
+    const questions = store.db.prepare(`${visibleQuestions} SELECT q.*,p.name project_name,u.username FROM visible_questions q JOIN projects p ON p.id=q.project_id JOIN users u ON u.id=q.user_id WHERE q.conversation_id=? ORDER BY q.turn_index`).all(usernameOf(request).id, row.id);
+    return { ...conversationSummary(row, questions), questions: questions.map(present) };
   });
   app.get('/api/questions/:id', async request => {
     const q = getQuestion((request.params as any).id, request);
@@ -160,7 +177,7 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
       let turnIndex = 1;
       let parentQuestionId: string | null = null;
       if (body.conversationId) {
-        const conversation = store.db.prepare('SELECT * FROM conversations WHERE id=? AND user_id=?').get(body.conversationId, usernameOf(request).id) as any;
+        const conversation = store.db.prepare('SELECT * FROM conversations c WHERE id=? AND user_id=? AND EXISTS(SELECT 1 FROM questions q WHERE q.conversation_id=c.id AND NOT EXISTS(SELECT 1 FROM question_deletions d WHERE d.question_id=q.id AND d.user_id=?))').get(body.conversationId, usernameOf(request).id, usernameOf(request).id) as any;
         if (!conversation) fail(404, '对话不存在');
         if (conversation.project_id !== body.projectId) fail(409, '追问不能更换对话项目');
         const latest = store.db.prepare('SELECT id,turn_index,status FROM questions WHERE conversation_id=? ORDER BY turn_index DESC LIMIT 1').get(conversationId) as any;
@@ -172,9 +189,9 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
       const turns = store.db.prepare("SELECT id questionId,turn_index turnIndex,question,answer FROM questions WHERE conversation_id=? AND status='answered' ORDER BY turn_index").all(conversationId) as any[];
       const snapshot = contextSnapshotSchema.parse({ formatVersion: 1, sourceIds: turns.map(turn => turn.questionId), turns });
       const settings = store.settings();
-      try { validatePromptInput(renderQuestionInput(body.question, snapshot), settings.extraPrompt, settings.claudePath); }
+      try { validatePromptInput(renderQuestionInput(body.question, snapshot), settings.extraPrompt, settings.claudePath, settings.fixedPrompt); }
       catch (error) { fail(413, error instanceof Error ? error.message : '对话上下文过长，请开启新对话'); }
-      if (!body.conversationId) store.db.prepare('INSERT INTO conversations VALUES(?,?,?,?)').run(conversationId, usernameOf(request).id, body.projectId, now);
+      if (!body.conversationId) store.db.prepare('INSERT INTO conversations(id,user_id,project_id,created_at) VALUES(?,?,?,?)').run(conversationId, usernameOf(request).id, body.projectId, now);
       store.db.prepare('INSERT INTO questions(id,user_id,project_id,question,status,created_at,updated_at,conversation_id,turn_index,parent_question_id,context_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(id, usernameOf(request).id, body.projectId, body.question, 'pending_question_review', now, now, conversationId, turnIndex, parentQuestionId, JSON.stringify(snapshot));
       store.audit(usernameOf(request).id, 'submit', id);
     }); service.notify(); return present(getQuestion(id, request));
@@ -215,10 +232,15 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
           store.db.prepare("UPDATE questions SET status='queued',updated_at=? WHERE id=? AND status='pending_question_review'").run(now, id);
         } else if (action === 'publish') {
           const answer = z.string().trim().min(1).max(20000).parse(body.answer);
-          if (/```|~~~/u.test(answer)) fail(400, '回答包含代码块，请改成简明的业务解释');
+          validateBusinessAnswer(answer);
           if (q.status === 'answered' && q.answer === answer) return;
           if (q.status !== 'pending_answer_review') fail(409, '回答状态已经变更');
           store.db.prepare("UPDATE questions SET status='answered',answer=?,updated_at=? WHERE id=? AND status='pending_answer_review'").run(answer, now, id);
+          const run = store.db.prepare("SELECT session_id,input_snapshot FROM runs WHERE question_id=? AND status='completed' ORDER BY started_at DESC,rowid DESC LIMIT 1").get(id) as any;
+          if (run?.session_id && z.string().uuid().safeParse(run.session_id).success) {
+            const input = JSON.parse(run.input_snapshot ?? '{}');
+            if (typeof input.projectPath === 'string') store.db.prepare('UPDATE conversations SET claude_session_id=?,claude_session_path=? WHERE id=?').run(run.session_id, input.projectPath, q.conversation_id);
+          }
         } else if (action === 'reject') {
           if (!['pending_question_review','pending_answer_review'].includes(q.status)) fail(409, '此问题当前不能拒绝');
           const reason = z.string().trim().min(1).max(1000).parse(body.reason ?? '管理员拒绝');
@@ -272,10 +294,12 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
       if (body.enabled === false && service.current) { const q = store.db.prepare('SELECT project_id FROM questions WHERE id=?').get(service.current.questionId) as any; if (q?.project_id === id) service.current.controller.abort(); }
       service.notify(); return { ok: true };
     });
-    app.get('/api/settings/prompt', async () => ({ fixedPrompt: buildBusinessPrompt(''), combinedPrompt: buildBusinessPrompt(store.settings().extraPrompt) }));
+    app.get('/api/settings/prompt', async () => { const settings = store.settings(); return { fixedPrompt: settings.fixedPrompt, combinedPrompt: buildBusinessPrompt(settings.extraPrompt, settings.fixedPrompt) }; });
     app.get('/api/settings', async () => ({ ...store.settings(), clientError: service.clientError }));
     app.post('/api/settings', async request => {
+      const currentSettings = store.settings();
       const settings = settingsSchema.parse(request.body);
+      if (!Object.hasOwn(request.body as object, 'fixedPrompt')) settings.fixedPrompt = currentSettings.fixedPrompt;
       if (!Object.hasOwn(request.body as object, 'adminNotificationMode')) settings.adminNotificationMode = store.settings().adminNotificationMode;
       if (settings.adminPort === settings.clientPort) fail(400, '管理端与客户端端口不能相同');
       if (settings.adminPort === 4309 || settings.clientPort === 4309) fail(400, '4309 为本机单实例保护保留端口');
@@ -283,19 +307,12 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
       store.transaction(() => { store.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify(settings)); store.audit(usernameOf(request).id, 'settings', 'settings'); }); return { ok: true, restartRequired: true };
     });
     app.post('/api/settings/probe', async () => probeClaude(store.settings().claudePath));
-    app.get('/api/export', async (_request, reply) => { reply.header('Content-Disposition', 'attachment; filename="desk-history.json"'); return { version: 2, formatVersion: 2, conversations: store.db.prepare('SELECT * FROM conversations').all(), exportedAt: new Date().toISOString(), questions: store.db.prepare('SELECT * FROM questions').all(), runs: store.db.prepare('SELECT * FROM runs').all(), audit: store.db.prepare('SELECT * FROM audit').all() }; });
+    app.get('/api/export', async (_request, reply) => { reply.header('Content-Disposition', 'attachment; filename="desk-history.json"'); return { version: 3, formatVersion: 3, deletions: store.db.prepare('SELECT * FROM question_deletions').all(), conversations: store.db.prepare('SELECT * FROM conversations').all(), exportedAt: new Date().toISOString(), questions: store.db.prepare('SELECT * FROM questions').all(), runs: store.db.prepare('SELECT * FROM runs').all(), audit: store.db.prepare('SELECT * FROM audit').all() }; });
     app.get('/api/backup', async (_request, reply) => {
       const path = join(store.directory, `backup-${randomUUID()}.sqlite`);
       await backup(store.db, path);
       const bytes = readFileSync(path); const { unlinkSync } = await import('node:fs'); unlinkSync(path);
       reply.header('Content-Disposition', 'attachment; filename="desk-backup.sqlite"'); reply.type('application/octet-stream'); return bytes;
-    });
-    const cleanupScope = `SELECT c.id FROM conversations c WHERE EXISTS(SELECT 1 FROM questions q WHERE q.conversation_id=c.id) AND NOT EXISTS(SELECT 1 FROM questions q WHERE q.conversation_id=c.id AND (q.created_at>=? OR q.archived<>1 OR q.status NOT IN ('answered','rejected','failed','cancelled')))`;
-    const cleanupCount = (before: string) => (store.db.prepare(`SELECT COUNT(*) count FROM questions WHERE conversation_id IN (${cleanupScope})`).get(before) as any).count;
-    app.post('/api/cleanup/preview', async request => { const body = z.object({ before: z.string().datetime() }).parse(request.body); return { count: cleanupCount(body.before) }; });
-    app.post('/api/cleanup', async request => {
-      const body = z.object({ before: z.string().datetime(), confirmation: z.literal('DELETE'), expectedCount: z.number().int().min(0) }).parse(request.body);
-      store.transaction(() => { if (cleanupCount(body.before) !== body.expectedCount) fail(409, '清理范围已经变更，请重新预览'); const ids = store.db.prepare(cleanupScope).all(body.before) as any[]; for (const { id } of ids) { store.db.prepare('DELETE FROM questions WHERE conversation_id=?').run(id); store.db.prepare('DELETE FROM conversations WHERE id=?').run(id); } store.audit(usernameOf(request).id, 'cleanup', `${body.before}: ${body.expectedCount}`); }); service.notify(); return { ok: true, deleted: body.expectedCount };
     });
     app.get('/api/launcher/events', async request => {
       const supplied = request.headers['x-launcher-token'];

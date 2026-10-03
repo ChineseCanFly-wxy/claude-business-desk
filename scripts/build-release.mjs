@@ -49,7 +49,7 @@ for (const name of ['server', 'web']) await cp(path.join(root, 'dist', name), pa
 run('dotnet', ['publish', 'apps/native-host/ClaudeTerminalHost.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-p:PublishSingleFile=true', ...dotnetVersion, '-o', path.join(staging, 'dist/native')], 'native host publish');
 run('dotnet', ['publish', 'apps/launcher/ClaudeBusinessDesk.Launcher.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', ...dotnetVersion, '-o', staging], 'launcher publish');
 // Copy the complete dependency tree, including native bindings and transitive dependencies.
-await cp(path.join(root, 'node_modules'), path.join(staging, 'node_modules'), { recursive: true, dereference: true });
+await cp(path.join(root, 'node_modules'), path.join(staging, 'node_modules'), { recursive: true, dereference: true, filter: source => !['.claude', '.codex', '.git'].includes(path.basename(source)) });
 await writeFile(path.join(staging, 'package.json'), JSON.stringify({ name: pkg.name, version: pkg.version, private: true, type: pkg.type ?? 'module' }, null, 2));
 await mkdir(path.join(staging, 'scripts'), { recursive: true });
 for (const name of ['启动.cmd', 'start.ps1']) await cp(path.join(root, 'scripts', name), path.join(staging, 'scripts', name));

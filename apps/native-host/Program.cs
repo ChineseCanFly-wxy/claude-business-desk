@@ -9,6 +9,15 @@ internal static class Program
     const long MaxTranscriptBytes = 32L * 1024 * 1024;
     const int MaxTranscriptLineChars = 2 * 1024 * 1024;
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool AllocConsole();
+    [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int kind);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool WriteConsoleInput(IntPtr input, InputRecord[] records, uint count, out uint written);
+    [StructLayout(LayoutKind.Explicit, Size=20)] struct InputRecord {
+        [FieldOffset(0)] public ushort Type;
+        [FieldOffset(4)] public int KeyDown;
+        [FieldOffset(8)] public ushort Repeat;
+        [FieldOffset(10)] public ushort VirtualKey;
+        [FieldOffset(14)] public char Character;
+    }
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetStdHandle(int kind, IntPtr handle);
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetHandleInformation(IntPtr handle,uint mask,uint flags);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFile(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
@@ -23,8 +32,12 @@ internal static class Program
                 var input = Console.In.ReadToEnd();
                 if (input.Length > 1024 * 1024) throw new Exception("Stop hook payload is too large");
                 using var doc = JsonDocument.Parse(input);
-                if (doc.RootElement.GetProperty("hook_event_name").GetString() == "Stop")
-                    File.WriteAllText(Path.Combine(dir, "stop.json"), input);
+                var kind = doc.RootElement.GetProperty("hook_event_name").GetString();
+                if (kind is "Stop" or "StopFailure") {
+                    var temporary = Path.Combine(dir, $"hook-{Guid.NewGuid()}.tmp");
+                    File.WriteAllText(temporary, input);
+                    File.Move(temporary, Path.Combine(dir, kind == "Stop" ? "stop.json" : "failure.json"), true);
+                }
                 return 0; // Observe the Stop event without changing another hook's decision.
             }
             if (args.Length != 2 || args[0] != "--task") throw new Exception("Expected structured --task file");
@@ -57,11 +70,29 @@ internal static class Program
                     job.Terminate(); System.Threading.Tasks.Task.WaitAll(output,error);
                     return exitCode;
                 }
-                child.WaitForExit(); int visibleExitCode = child.ExitCode; cancel.Cancel(); watcher.GetAwaiter().GetResult();
+                string? collected = null;
+                while (!child.WaitForExit(100)) {
+                    if (File.Exists(Path.Combine(dirPath,"cancel"))) throw new Exception("Claude terminal was cancelled or timed out");
+                    CheckFailure(dirPath, task);
+                    if (collected == null) {
+                        // The Stop hook is an observation, not proof that other hooks finished.
+                        // Wait for the transcript's completed turn marker before closing Claude.
+                        try { collected = ValidateVisibleResult(dirPath, task); }
+                        catch (JsonException) { continue; } // The transcript is written asynchronously.
+                        catch (IOException) { continue; }
+                        if (collected != null) {
+                            Console.Title = "沐雨橙风 · 回答已完成，正在自动回传";
+                            SendExit();
+                        }
+                    }
+                }
+                int visibleExitCode = child.ExitCode; cancel.Cancel(); watcher.GetAwaiter().GetResult();
                 job.Terminate();
                 if (File.Exists(Path.Combine(dirPath,"cancel"))) throw new Exception("Claude terminal was cancelled or timed out");
                 if (visibleExitCode != 0) throw new Exception($"Claude terminal exited with code {visibleExitCode}");
-                var answer = ValidateVisibleResult(dirPath, task);
+                CheckFailure(dirPath, task);
+                var answer = ValidateVisibleResult(dirPath, task) ?? throw new Exception("Claude terminal closed before a complete answer was verified");
+                if (collected != null && answer != collected) throw new Exception("Claude answer changed while closing the terminal");
                 File.WriteAllText(Path.Combine(dirPath,"result.json"), JsonSerializer.Serialize(new { answer, sessionId=task.SessionId, exitCode=0 }));
                 return 0;
             } finally {
@@ -81,27 +112,56 @@ internal static class Program
         var output = CreateFile("CONOUT$",0xC0000000,3,IntPtr.Zero,3,0,IntPtr.Zero);
         if (input == new IntPtr(-1) || output == new IntPtr(-1) || !SetHandleInformation(input,1,1) || !SetHandleInformation(output,1,1) || !SetStdHandle(-10,input) || !SetStdHandle(-11,output) || !SetStdHandle(-12,output))
             throw new Exception("Cannot attach Claude terminal input/output");
-        Console.Title = "沐雨橙风 · Claude 对话（回答完成后输入 /exit）";
+        Console.Title = "沐雨橙风 · Claude 对话（回答完成后自动回传）";
     }
 
-    static string ValidateVisibleResult(string dirPath, TaskSpec task)
+    static void SendExit()
+    {
+        var records = new List<InputRecord>();
+        foreach (var character in "/exit\r") {
+            ushort key = character == '\r' ? (ushort)13 : character == '/' ? (ushort)191 : char.ToUpperInvariant(character);
+            records.Add(new InputRecord { Type=1, KeyDown=1, Repeat=1, VirtualKey=key, Character=character });
+            records.Add(new InputRecord { Type=1, KeyDown=0, Repeat=1, VirtualKey=key, Character=character });
+        }
+        if (!WriteConsoleInput(GetStdHandle(-10), records.ToArray(), (uint)records.Count, out var written) || written != records.Count)
+            throw new Exception("Cannot automatically close the completed Claude terminal");
+    }
+
+    static void CheckFailure(string dirPath, TaskSpec task)
+    {
+        var failurePath = Path.Combine(dirPath,"failure.json");
+        if (!File.Exists(failurePath)) return;
+        if (new FileInfo(failurePath).Length > 1024 * 1024) throw new Exception("Claude failure payload is too large");
+        using var doc = JsonDocument.Parse(File.ReadAllText(failurePath));
+        if (doc.RootElement.GetProperty("session_id").GetString() != task.SessionId) throw new Exception("Failure session mismatch");
+        throw new Exception("Claude terminal failed: " + (doc.RootElement.TryGetProperty("error_details", out var detail) ? detail.ToString() : "API error"));
+    }
+
+    static string? ValidateVisibleResult(string dirPath, TaskSpec task)
     {
         var stopPath = Path.Combine(dirPath,"stop.json");
-        if (!File.Exists(stopPath) || new FileInfo(stopPath).Length > 1024 * 1024) throw new Exception("Claude did not produce a valid completed turn");
+        if (!File.Exists(stopPath)) return null;
+        if (new FileInfo(stopPath).Length > 1024 * 1024) throw new Exception("Claude did not produce a valid completed turn");
         using var stop = JsonDocument.Parse(File.ReadAllText(stopPath));
         var hook = stop.RootElement;
         if (hook.GetProperty("session_id").GetString() != task.SessionId) throw new Exception("Stop session mismatch");
         var transcript = Path.GetFullPath(hook.GetProperty("transcript_path").GetString() ?? "");
-        if (Path.GetFileNameWithoutExtension(transcript) != task.SessionId || !File.Exists(transcript)) throw new Exception("Transcript session mismatch");
+        if (Path.GetFileNameWithoutExtension(transcript) != task.SessionId) throw new Exception("Transcript session mismatch");
+        if (!File.Exists(transcript)) return null;
         if (new FileInfo(transcript).Length > MaxTranscriptBytes) throw new Exception("Claude transcript is too large");
-        string? final = null; bool questionSeen = false; bool pending = false; bool exitSeen = false;
+        string? final = null; bool questionSeen = false; bool pending = false; bool exitSeen = false; bool completed = false;
         foreach (var line in File.ReadLines(transcript)) {
             if (line.Length > MaxTranscriptLineChars) throw new Exception("Claude transcript line is too large");
             using var entry = JsonDocument.Parse(line); var row = entry.RootElement;
             if (row.TryGetProperty("sessionId",out var sid) && sid.GetString() != task.SessionId) throw new Exception("Transcript foreign session");
             var kind = row.TryGetProperty("type",out var rowType) ? rowType.GetString() : null;
-            if (questionSeen && kind == "system" && row.TryGetProperty("subtype",out var subtype) && subtype.GetString() == "stop_hook_summary" && row.TryGetProperty("preventedContinuation",out var prevented) && prevented.ValueKind == JsonValueKind.True) {
-                final = null; pending = true; continue;
+            if (questionSeen && kind == "system" && row.TryGetProperty("subtype",out var subtype)) {
+                if (subtype.GetString() == "stop_hook_summary" && row.TryGetProperty("preventedContinuation",out var prevented)) {
+                    if (prevented.ValueKind == JsonValueKind.True) { final = null; pending = true; completed = false; }
+                    else if (prevented.ValueKind == JsonValueKind.False && !pending && !string.IsNullOrWhiteSpace(final)) completed = true;
+                    continue;
+                }
+                if (subtype.GetString() == "turn_duration" && !pending && !string.IsNullOrWhiteSpace(final)) completed = true;
             }
             if (questionSeen && ((row.TryGetProperty("isApiErrorMessage",out var apiError) && apiError.ValueKind == JsonValueKind.True) || (row.TryGetProperty("interruptedMessageId",out var interrupted) && interrupted.ValueKind != JsonValueKind.Null) || (kind == "system" && row.TryGetProperty("subtype",out var systemSubtype) && systemSubtype.GetString() == "error")))
                 throw new Exception("Turn interrupted or failed");
@@ -113,19 +173,20 @@ internal static class Program
                 var toolResult = content.ValueKind == JsonValueKind.Array && content.GetArrayLength()>0 && content.EnumerateArray().All(x=>x.TryGetProperty("type",out var blockType) && blockType.GetString()=="tool_result");
                 if (!questionSeen && text == task.Question) { questionSeen = true; final = null; pending = true; }
                 else if (questionSeen && text == "[Request interrupted by user]") throw new Exception("Turn interrupted or failed");
-                else if (questionSeen && !pending && !string.IsNullOrWhiteSpace(final) && IsExitCommand(text)) exitSeen = true;
+                else if (questionSeen && completed && !pending && !string.IsNullOrWhiteSpace(final) && IsExitCommand(text)) exitSeen = true;
                 else if (questionSeen && exitSeen && IsExitOutput(text)) { }
                 else if (questionSeen && !metadata && !toolResult)
                     throw new Exception("Additional user turn is not the requested business question");
             } else if (type.GetString() == "assistant" && questionSeen) {
                 if (exitSeen) throw new Exception("Additional assistant turn after /exit");
+                completed = false;
                 var blocks = message.GetProperty("content").EnumerateArray().ToArray();
                 pending = blocks.Any(x=>x.GetProperty("type").GetString()=="tool_use");
                 final = string.Join("\n",blocks.Where(x=>x.GetProperty("type").GetString()=="text").Select(x=>x.GetProperty("text").GetString()));
                 if (!message.TryGetProperty("stop_reason",out var reason) || reason.GetString() != "end_turn") pending = true;
             }
         }
-        if (!questionSeen || !exitSeen || pending || string.IsNullOrWhiteSpace(final) || final != hook.GetProperty("last_assistant_message").GetString()) throw new Exception("No verified complete assistant answer; finish the turn, enter /exit, then retry");
+        if (!questionSeen || !completed || pending || string.IsNullOrWhiteSpace(final) || final != hook.GetProperty("last_assistant_message").GetString()) return null;
         if (final.Length > 20000) throw new Exception("Claude answer exceeds 20000 characters");
         return final.Trim();
     }

@@ -2,9 +2,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { DEFAULT_BUSINESS_PROMPT } from './claude/prompt.js';
 
 export const activeStates = ['pending_question_review', 'queued', 'running', 'pending_answer_review'];
-export const defaultSettings = { claudePath: '', mode: 'hidden' as 'hidden' | 'visible', timeoutSeconds: 300, clientHost: '127.0.0.1', clientPort: 4311, adminPort: 4310, allowInsecureLan: false, adminNotificationMode: 'window' as 'window' | 'notification', extraPrompt: '' };
+export const defaultSettings = { claudePath: '', mode: 'hidden' as 'hidden' | 'visible', timeoutSeconds: 300, clientHost: '127.0.0.1', clientPort: 4311, adminPort: 4310, allowInsecureLan: false, adminNotificationMode: 'window' as 'window' | 'notification', fixedPrompt: DEFAULT_BUSINESS_PROMPT, extraPrompt: '' };
 export type Settings = typeof defaultSettings;
 export class Store {
   db: DatabaseSync;
@@ -12,7 +13,7 @@ export class Store {
     mkdirSync(directory, { recursive: true });
     this.db = new DatabaseSync(join(directory, 'desk.sqlite'));
     const version = (this.db.prepare('PRAGMA user_version').get() as any).user_version;
-    if (version > 2) { this.db.close(); throw new Error(`数据库版本 ${version} 高于当前支持版本 2，拒绝打开`); }
+    if (version > 3) { this.db.close(); throw new Error(`数据库版本 ${version} 高于当前支持版本 3，拒绝打开`); }
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
     try { this.transaction(() => {
     this.db.exec(`
@@ -42,6 +43,13 @@ export class Store {
         this.db.prepare('UPDATE questions SET conversation_id=? WHERE id=?').run(id, q.id);
       }
       this.db.exec('PRAGMA user_version=2;');
+    }
+    if (version < 3) {
+      this.db.exec(`CREATE TABLE question_deletions(user_id TEXT NOT NULL REFERENCES users(id),question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,created_at TEXT NOT NULL,PRIMARY KEY(user_id,question_id));
+        CREATE INDEX deleted_questions ON question_deletions(question_id);
+        ALTER TABLE conversations ADD COLUMN claude_session_id TEXT;
+        ALTER TABLE conversations ADD COLUMN claude_session_path TEXT;
+        PRAGMA user_version=3;`);
     }
     this.db.prepare('INSERT OR IGNORE INTO settings(id,value) VALUES(1,?)').run(JSON.stringify(defaultSettings));
     }); } catch (error) { this.db.close(); throw error; }

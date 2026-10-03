@@ -3,17 +3,18 @@ import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ClaudeProtocol, redactLog, type ClaudeResult } from './protocol.js';
-import { buildBusinessPrompt, type RunnerOptions } from './runner.js';
+import type { RunnerOptions } from './runner.js';
+import { buildBusinessPrompt } from './prompt.js';
 import { validateWindowsCommand } from './limits.js';
 export async function buildNativeArguments(options: RunnerOptions, sessionId: string, dir: string, host: string): Promise<string[]> {
-  const args = ['--permission-mode', options.mode === 'hidden' ? 'auto' : 'manual', '--session-id', sessionId, '--append-system-prompt', buildBusinessPrompt(options.extraPrompt)];
+  const args = ['--permission-mode', options.mode === 'hidden' ? 'auto' : 'bypassPermissions', ...(options.resumeSessionId ? ['--resume', options.resumeSessionId] : ['--session-id', sessionId]), '--system-prompt-snapshot', 'off', '--append-system-prompt', buildBusinessPrompt(options.extraPrompt, options.fixedPrompt)];
   if (options.mode === 'hidden') args.unshift('-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-prompts', 'none');
   else {
     const settings = join(dir, 'collector-settings.json');
     // Claude hooks use their documented shell command contract; executable/task invocation remains shell-free.
     if (/["%\r\n]/.test(host + dir)) throw new Error('Unsupported hook command path');
     const command = `"${host}" --collect "${dir}"`;
-    await writeFile(settings, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command }] }] } }), { flag: 'wx' });
+    await writeFile(settings, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command }] }], StopFailure: [{ hooks: [{ type: 'command', command }] }] } }), { flag: 'wx' });
     args.push('--settings', settings, '--', options.question);
   }
   return args;
@@ -22,7 +23,7 @@ export async function buildNativeArguments(options: RunnerOptions, sessionId: st
 async function visibleResult(path: string, sessionId: string): Promise<ClaudeResult> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, 'utf8')); }
-  catch { throw new Error('可见 Claude 终端未生成可验证的最终答案，请在终端正常完成回答后输入 /exit'); }
+  catch { throw new Error('可见 Claude 终端未生成可验证的最终答案，请在终端正常完成回答，系统会自动收取答案'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid native completion');
   const result = value as Record<string, unknown>;
   if (result.sessionId !== sessionId || typeof result.answer !== 'string' || !result.answer.trim() || result.answer.length > 20000 || result.exitCode !== 0) throw new Error('Invalid native completion');
@@ -31,7 +32,7 @@ async function visibleResult(path: string, sessionId: string): Promise<ClaudeRes
 }
 
 export async function runNative(options: RunnerOptions, cli: string, cwd: string, dir: string, host: string): Promise<ClaudeResult> {
-  const sessionId = randomUUID();
+  const sessionId = options.resumeSessionId ?? randomUUID();
   const args = await buildNativeArguments(options, sessionId, dir, host);
   validateWindowsCommand(cli, args);
   const env = { ...process.env }; delete env.CLAUDECODE;

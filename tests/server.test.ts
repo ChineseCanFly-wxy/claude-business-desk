@@ -146,20 +146,34 @@ test('server integration: approval, isolation, sessions, backup and safe cleanup
       assert.equal((await request(clientApp, anonymous.session, 'POST', '/api/login', { username: 'short-password', password: '' })).statusCode, 400);
     });
 
-    await t.test('prompt preview is administrator-only and includes saved extra business instructions', async () => {
+    await t.test('fixed business prompt is administrator-only, saved, validated and preserved for legacy forms', async () => {
       const anonymous = await meta(adminApp);
       assert.equal((await request(adminApp, anonymous.session, 'GET', '/api/settings/prompt')).statusCode, 401);
       assert.equal((await request(clientApp, clientSession, 'GET', '/api/settings/prompt')).statusCode, 404);
       assert.equal((await request(adminApp, clientSession, 'GET', '/api/settings/prompt')).statusCode, 401);
       const original = (await request(adminApp, adminSession, 'GET', '/api/settings')).json();
       const extraPrompt = 'TEST EXTRA BUSINESS: invoice reconciliation';
-      assert.equal((await request(adminApp, adminSession, 'POST', '/api/settings', { ...original, extraPrompt })).statusCode, 200);
+      const fixedPrompt = 'CUSTOM BUSINESS ROLE: answer only approved invoice reconciliation questions';
+      assert.equal((await request(adminApp, adminSession, 'POST', '/api/settings', { ...original, fixedPrompt, extraPrompt })).statusCode, 200);
+      assert.equal((await request(adminApp, adminSession, 'GET', '/api/settings')).json().fixedPrompt, fixedPrompt);
+      const legacy = { ...original, extraPrompt }; delete legacy.fixedPrompt;
+      assert.equal((await request(adminApp, adminSession, 'POST', '/api/settings', legacy)).statusCode, 200);
+      assert.equal(store.settings().fixedPrompt, fixedPrompt, 'a stale form cannot erase an edited fixed prompt');
+      for (const invalid of ['', ' \n ', null, 1, 'x'.repeat(4001), 'invalid\0prompt']) {
+        assert.equal((await request(adminApp, adminSession, 'POST', '/api/settings', { ...original, fixedPrompt: invalid })).statusCode, 400);
+        assert.equal(store.settings().fixedPrompt, fixedPrompt, 'invalid saves leave the current settings untouched');
+      }
       const preview = await request(adminApp, adminSession, 'GET', '/api/settings/prompt');
       assert.equal(preview.statusCode, 200);
-      assert.ok(preview.json().fixedPrompt.length > 0);
+      assert.equal(preview.json().fixedPrompt, fixedPrompt);
       assert.ok(!preview.json().fixedPrompt.includes(extraPrompt));
-      assert.ok(preview.json().combinedPrompt.startsWith(preview.json().fixedPrompt));
+      assert.ok(preview.json().combinedPrompt.startsWith('【业务问答只读规则】'));
+      assert.ok(preview.json().combinedPrompt.includes('可以使用现有 MCP'));
+      assert.ok(preview.json().combinedPrompt.includes(preview.json().fixedPrompt));
       assert.ok(preview.json().combinedPrompt.includes(extraPrompt));
+      assert.ok(!preview.json().combinedPrompt.includes(original.fixedPrompt));
+      store.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify(legacy));
+      assert.equal(store.settings().fixedPrompt, original.fixedPrompt, 'old databases receive the original default prompt');
       assert.equal((await request(adminApp, adminSession, 'POST', '/api/settings', original)).statusCode, 200);
     });
 
@@ -226,6 +240,7 @@ test('server integration: approval, isolation, sessions, backup and safe cleanup
     });
 
     await t.test('concurrent submissions across projects allow exactly one active question', async () => {
+      assert.deepEqual((await request(adminApp, adminSession, 'GET', '/api/stats')).json(), { pendingQuestions: 0, pendingAnswers: 0, running: 0, queued: 0, total: 0 });
       const responses = await Promise.all(projects.map(projectId => request(clientApp, clientSession, 'POST', '/api/questions', { projectId, question: 'Explain the business workflow' })));
       assert.deepEqual(responses.map(response => response.statusCode).sort(), [200, 409]);
       questionId = responses.find(response => response.statusCode === 200)!.json().id;
@@ -234,6 +249,7 @@ test('server integration: approval, isolation, sessions, backup and safe cleanup
       await new Promise<void>(resolve => setImmediate(resolve));
       assert.equal(calls.length, 0, 'pending question must never execute');
       assert.equal((await request(clientApp, clientSession, 'GET', `/api/questions/${questionId}`)).json().status, 'pending_question_review');
+      assert.deepEqual((await request(adminApp, adminSession, 'GET', '/api/stats')).json(), { pendingQuestions: 1, pendingAnswers: 0, running: 0, queued: 0, total: 1 });
     });
 
     await t.test('launcher pending identities have no question, answer, user or log body', async () => {
@@ -267,6 +283,7 @@ test('server integration: approval, isolation, sessions, backup and safe cleanup
       assert.equal(calls.length, 1);
       const running = await request(clientApp, clientSession, 'GET', `/api/questions/${questionId}`);
       assert.equal(running.json().status, 'running');
+      assert.deepEqual((await request(adminApp, adminSession, 'GET', '/api/stats')).json(), { pendingQuestions: 0, pendingAnswers: 0, running: 1, queued: 0, total: 1 });
       assert.ok(!running.body.includes(log));
       const execution = service.current!.promise;
       assert.ok(finish);
@@ -274,6 +291,7 @@ test('server integration: approval, isolation, sessions, backup and safe cleanup
       await execution;
       const adminDetail = await request(adminApp, adminSession, 'GET', `/api/questions/${questionId}`);
       assert.equal(adminDetail.json().draftAnswer, draft);
+      assert.deepEqual((await request(adminApp, adminSession, 'GET', '/api/stats')).json(), { pendingQuestions: 0, pendingAnswers: 1, running: 0, queued: 0, total: 1 });
       assert.ok(!('runs' in adminDetail.json()), 'ordinary admin detail excludes execution records');
       assert.ok(!adminDetail.body.includes(log));
       for (const url of [`/api/questions/${questionId}`, '/api/questions']) {
@@ -291,12 +309,18 @@ test('server integration: approval, isolation, sessions, backup and safe cleanup
 
     await t.test('only explicitly published answer becomes client-visible; publish is idempotent', async () => {
       const answer = 'Reviewed business explanation';
-      assert.equal((await request(adminApp, adminSession, 'POST', `/api/questions/${questionId}/publish`, { answer: '```private code```' })).statusCode, 400);
+      for (const technicalAnswer of ['```private code```', '代码第42行说明报销上限。', '参考src/rules.ts:15', '函数：calculateLimit()']) {
+        const blocked = await request(adminApp, adminSession, 'POST', `/api/questions/${questionId}/publish`, { answer: technicalAnswer });
+        assert.equal(blocked.statusCode, 400, blocked.body);
+        assert.equal((await request(clientApp, clientSession, 'GET', `/api/questions/${questionId}`)).json().answer, undefined, 'technical drafts must not become client-visible');
+        assert.equal((store.db.prepare('SELECT answer FROM questions WHERE id=?').get(questionId) as any).answer, null);
+      }
       for (let index = 0; index < 2; index++) {
         assert.equal((await request(adminApp, adminSession, 'POST', `/api/questions/${questionId}/publish`, { answer })).statusCode, 200);
       }
       const detail = await request(clientApp, clientSession, 'GET', `/api/questions/${questionId}`);
       assert.equal(detail.json().status, 'answered');
+      assert.deepEqual((await request(adminApp, adminSession, 'GET', '/api/stats')).json(), { pendingQuestions: 0, pendingAnswers: 0, running: 0, queued: 0, total: 1 });
       assert.equal(detail.json().answer, answer);
       assert.equal((await request(clientApp, clientSession, 'GET', '/api/questions')).json().items[0].answer, answer);
       assert.ok(!detail.body.includes(draft));
@@ -368,35 +392,26 @@ test('server integration: approval, isolation, sessions, backup and safe cleanup
       assert.equal((await request(clientApp, otherSession, 'GET', '/api/me')).statusCode, 200);
     });
 
-    await t.test('cleanup requires matching preview and deletes only old archived terminal questions', async () => {
-      const before = '2024-01-01T00:00:00.000Z';
-      const old = '2023-01-01T00:00:00.000Z', recent = '2025-01-01T00:00:00.000Z';
-      const deleted: string[] = [], retained: string[] = [questionId];
-      const seed = (status: string, archived: number, createdAt: string) => {
-        const id = randomUUID();
-        // Each active state gets a separate user to respect the production unique index.
-        const owner = activeStates.includes(status) ? randomUUID() : otherId;
-        if (owner !== otherId) store.db.prepare('INSERT INTO users VALUES(?,?,?,?,1,?)').run(owner, `seed-${owner}`, 'unused', 'client', old);
-        store.db.prepare('INSERT INTO conversations VALUES(?,?,?,?)').run(id, owner, projects[0], createdAt);
-        store.db.prepare('INSERT INTO questions(id,user_id,project_id,question,status,archived,created_at,updated_at,conversation_id) VALUES(?,?,?,?,?,?,?,?,?)').run(id, owner, projects[0], 'Cleanup fixture', status, archived, createdAt, createdAt, id);
-        return id;
-      };
+    await t.test('history deletion requires a matching preview and preserves other viewers and underlying data', async () => {
+      const completed: string[] = [];
+      const old = '2023-01-01T00:00:00.000Z';
       for (const status of ['answered', 'rejected', 'failed', 'cancelled']) {
-        deleted.push(seed(status, 1, old));
-        retained.push(seed(status, 0, old), seed(status, 1, recent), seed(status, 1, before));
+        const id = randomUUID(); completed.push(id);
+        store.db.prepare('INSERT INTO conversations(id,user_id,project_id,created_at) VALUES(?,?,?,?)').run(id, otherId, projects[0], old);
+        store.db.prepare('INSERT INTO questions(id,user_id,project_id,question,status,created_at,updated_at,conversation_id) VALUES(?,?,?,?,?,?,?,?)').run(id, otherId, projects[0], 'History fixture', status, old, old, id);
       }
-      for (const status of activeStates) retained.push(seed(status, 1, old));
-      store.db.prepare("INSERT INTO runs(id,question_id,status,started_at) VALUES(?,?,'completed',?)").run(randomUUID(), deleted[0], old);
-      assert.equal((await request(adminApp, adminSession, 'POST', '/api/cleanup/preview', { before })).json().count, deleted.length);
-      assert.equal((await request(adminApp, adminSession, 'POST', '/api/cleanup', { before, confirmation: 'DELETE', expectedCount: deleted.length + 1 })).statusCode, 409);
-      assert.equal((await request(adminApp, adminSession, 'POST', '/api/cleanup', { before, confirmation: 'WRONG', expectedCount: deleted.length })).statusCode, 400);
-      for (const id of deleted) assert.ok(store.db.prepare('SELECT 1 FROM questions WHERE id=?').get(id));
-      const response = await request(adminApp, adminSession, 'POST', '/api/cleanup', { before, confirmation: 'DELETE', expectedCount: deleted.length });
+      const selection = { questionIds: completed };
+      const previewResponse = await request(adminApp, adminSession, 'POST', '/api/history/delete/preview', selection);
+      assert.equal(previewResponse.statusCode, 200, previewResponse.body);
+      const preview = previewResponse.json(); assert.equal(preview.count, completed.length);
+      assert.equal((await request(adminApp, adminSession, 'POST', '/api/history/delete', { selection, before: preview.before, expectedCount: completed.length + 1 })).statusCode, 409);
+      const response = await request(adminApp, adminSession, 'POST', '/api/history/delete', { selection, before: preview.before, expectedCount: completed.length });
       assert.equal(response.statusCode, 200, response.body);
-      assert.equal(response.json().deleted, deleted.length);
-      for (const id of deleted) assert.equal(store.db.prepare('SELECT 1 FROM questions WHERE id=?').get(id), undefined);
-      for (const id of retained) assert.ok(store.db.prepare('SELECT 1 FROM questions WHERE id=?').get(id), id);
-      assert.equal((store.db.prepare('SELECT COUNT(*) n FROM runs WHERE question_id=?').get(deleted[0]) as any).n, 0);
+      for (const id of completed) {
+        assert.ok(store.db.prepare('SELECT 1 FROM questions WHERE id=?').get(id));
+        assert.equal((await request(adminApp, adminSession, 'GET', '/api/questions/' + id)).statusCode, 404);
+        assert.equal((await request(clientApp, otherSession, 'GET', '/api/questions/' + id)).statusCode, 200);
+      }
       assert.deepEqual(store.db.prepare('PRAGMA foreign_key_check').all(), []);
     });
     assert.equal(service.listeners.size, 0, 'tests must not open SSE connections');
@@ -427,7 +442,7 @@ async function lifecycleFixture(executor: Executor) {
     const userId = randomUUID(), id = randomUUID();
     store.db.prepare('INSERT INTO users VALUES(?,?,?,?,1,?)').run(userId, `client-${userId}`, 'unused', 'client', now);
     store.db.prepare('INSERT INTO grants VALUES(?,?)').run(userId, projectId);
-    store.db.prepare('INSERT INTO conversations VALUES(?,?,?,?)').run(id, userId, projectId, createdAt);
+    store.db.prepare('INSERT INTO conversations(id,user_id,project_id,created_at) VALUES(?,?,?,?)').run(id, userId, projectId, createdAt);
     store.db.prepare('INSERT INTO questions(id,user_id,project_id,question,status,created_at,updated_at,conversation_id) VALUES(?,?,?,?,?,?,?,?)').run(id, userId, projectId, `Question ${id}`, status, createdAt, now, id);
     return id;
   };
@@ -495,7 +510,9 @@ test('failed execution requires retry and a fresh approval before executing agai
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(calls, 2);
     assert.equal(fixture.status(id), 'pending_answer_review');
-    assert.equal((fixture.store.db.prepare('SELECT COUNT(*) n FROM runs WHERE question_id=?').get(id) as any).n, 2);
+    const retriedRuns = fixture.store.db.prepare('SELECT input_snapshot FROM runs WHERE question_id=?').all(id) as any[];
+    assert.equal(retriedRuns.length, 2);
+    for (const run of retriedRuns) { assert.ok(JSON.parse(run.input_snapshot).systemPrompt.includes('【业务问答只读规则】')); assert.ok(JSON.parse(run.input_snapshot).systemPrompt.includes('【业务回答呈现规则】')); }
   } finally { await fixture.dispose(); }
 });
 

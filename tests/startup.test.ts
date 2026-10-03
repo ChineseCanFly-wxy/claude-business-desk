@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +12,7 @@ import { Store, defaultSettings } from '../apps/server/src/store.js';
 test('client startup failures preserve the admin settings page and allow recovery after restart', { timeout: 60_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'desk-startup-test-'));
   const root = fileURLToPath(new URL('../', import.meta.url));
-  const reservations = [createServer(), createServer()];
+  const reservations = [createServer(), createServer(), createServer()];
   let child: ChildProcess | undefined, output = '', launchError: Error | undefined;
   let cookie = '', csrf = '';
   const occupied = createServer();
@@ -39,9 +39,17 @@ test('client startup failures preserve the admin settings page and allow recover
     await Promise.all(reservations.map(server => new Promise<void>((resolve, reject) => {
       server.once('error', reject); server.listen({ host: '127.0.0.1', port: 0 }, resolve);
     })));
-    const [adminPort, clientPort] = reservations.map(server => (server.address() as { port: number }).port);
+    const [adminPort, clientPort, guardPort] = reservations.map(server => (server.address() as { port: number }).port);
     await Promise.all(reservations.map(server => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))));
     assert.notEqual(adminPort, 4309); assert.notEqual(clientPort, 4309);
+    // Keep the real startup path while isolating its OS-level single-instance port.
+    // The installed workbench may be running on 4309 during local verification.
+    const source = await readFile(new URL('../apps/server/src/main.ts', import.meta.url), 'utf8');
+    assert.equal(source.match(/port: 4309/g)?.length, 1);
+    const entry = join(directory, 'server-fixture.mts');
+    await writeFile(entry, source
+      .replace(/from '(\.\/[^']+)\.js'/g, (_match, module) => `from '${new URL(`../apps/server/src/${module.slice(2)}.ts`, import.meta.url).href}'`)
+      .replace('port: 4309', `port: ${guardPort}`));
     const adminUrl = `http://127.0.0.1:${adminPort}`;
     const clientUrl = `http://127.0.0.1:${clientPort}`;
     const api = (path: string, body?: unknown) => fetch(`${adminUrl}/api${path}`, {
@@ -51,7 +59,7 @@ test('client startup failures preserve the admin settings page and allow recover
     });
     async function start() {
       output = ''; launchError = undefined;
-      child = spawn(process.execPath, ['--import', 'tsx', 'apps/server/src/main.ts'], {
+      child = spawn(process.execPath, ['--import', 'tsx', entry], {
         cwd: root, env: { ...process.env, DESK_DATA_DIR: directory }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
       });
       child.once('error', error => { launchError = error; });
