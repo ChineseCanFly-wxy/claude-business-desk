@@ -4,7 +4,17 @@
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-03
+## [0.1.1] - 2026-10-03
+
+### Fixed
+- 修复可见终端回传时读取转录文件阻止 Claude 并发写入的问题：使用允许读写共享的有界快照，保留完整回答、会话和退出校验，避免偶发文件忙导致终端退出。
+- 原生验收新增持续追加转录的回归场景及子进程异常诊断，验证一边写入一边自动回传。
+- 保留版本标签说明中的 Markdown 小标题。
+
+### Added
+- 首个正式 Windows x64 下载包，包含 0.1.0 记录的全部业务功能；GitHub 在干净 Windows 主机实际启动 EXE 验收管理端和客户入口，并提供 ZIP 与 SHA-256。
+
+## [0.1.0] - 2026-10-03（构建未通过，未发布）
 
 ### Added
 - 管理端与客户入口分离，支持管理员、客户、项目和项目授权管理。
@@ -37,5 +47,6 @@
 - Claude 后台执行使用 `auto`，可见终端按管理员要求使用 `bypassPermissions`；取消与退出时通过 JobObject 清理子进程树。
 - 发行包排除用户数据、环境文件、数据库、token 和 Claude 登录凭证。
 
-[Unreleased]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/ChineseCanFly-wxy/claude-business-desk/releases/tag/v0.1.0
+[Unreleased]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/ChineseCanFly-wxy/claude-business-desk/releases/tag/v0.1.1
+[0.1.0]: https://github.com/ChineseCanFly-wxy/claude-business-desk/tree/v0.1.0

@@ -137,6 +137,22 @@ internal static class Program
         throw new Exception("Claude terminal failed: " + (doc.RootElement.TryGetProperty("error_details", out var detail) ? detail.ToString() : "API error"));
     }
 
+    static IEnumerable<string> ReadTranscriptSnapshot(string path)
+    {
+        byte[] snapshot;
+        // Claude keeps appending while we validate. Never deny the writer access
+        // and never read beyond this bounded snapshot if the file keeps growing.
+        using (var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+            var length = source.Length;
+            if (length > MaxTranscriptBytes) throw new Exception("Claude transcript is too large");
+            snapshot = new byte[checked((int)length)];
+            source.ReadExactly(snapshot);
+        }
+        using var reader = new StreamReader(new MemoryStream(snapshot, false));
+        string? line;
+        while ((line = reader.ReadLine()) != null) yield return line;
+    }
+
     static string? ValidateVisibleResult(string dirPath, TaskSpec task)
     {
         var stopPath = Path.Combine(dirPath,"stop.json");
@@ -150,7 +166,7 @@ internal static class Program
         if (!File.Exists(transcript)) return null;
         if (new FileInfo(transcript).Length > MaxTranscriptBytes) throw new Exception("Claude transcript is too large");
         string? final = null; bool questionSeen = false; bool pending = false; bool exitSeen = false; bool completed = false;
-        foreach (var line in File.ReadLines(transcript)) {
+        foreach (var line in ReadTranscriptSnapshot(transcript)) {
             if (line.Length > MaxTranscriptLineChars) throw new Exception("Claude transcript line is too large");
             using var entry = JsonDocument.Parse(line); var row = entry.RootElement;
             if (row.TryGetProperty("sessionId",out var sid) && sid.GetString() != task.SessionId) throw new Exception("Transcript foreign session");

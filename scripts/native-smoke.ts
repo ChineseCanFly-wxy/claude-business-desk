@@ -46,7 +46,7 @@ const cancelled = await fixture(descendant+'setTimeout(()=>{},30000);',true);ass
 const automatic = await fixture('const question=require("fs").readFileSync(0,"utf8");console.log(JSON.stringify({type:"system",subtype:"init",tools:[],mcp_servers:[],permissionMode:"auto"}));console.log(JSON.stringify({type:"result",subtype:"success",is_error:false,result:question,session_id:"fixture"}));');
 const protocol = new ClaudeProtocol();protocol.push(Buffer.from(automatic.out));assert.equal(protocol.finish(automatic.code!).answer,'管道输入');
 
-async function visibleTranscript(afterQuestion: object[], lastAssistantMessage: string, delayCompletion = 0) {
+async function visibleTranscript(afterQuestion: object[], lastAssistantMessage: string, delayCompletion = 0, streaming = false) {
   const dir = await mkdtemp(join(tmpdir(),'desk-visible-fixture-'));
   try {
     const sessionId=randomUUID(),question='可见终端测试问题';
@@ -56,17 +56,19 @@ async function visibleTranscript(afterQuestion: object[], lastAssistantMessage: 
     // A real terminal input stream stays alive until the host automatically sends /exit.
     // Delayed completion proves Stop alone cannot prematurely finish a running turn.
     await writeFile(script,`const tty=require('tty');if(![0,1,2].every(fd=>tty.isatty(fd)))process.exit(9);
-const fs=require('fs'),path=require('path');const [dir,transcript,rawRows,hook,delay]=process.argv.slice(2),rows=JSON.parse(rawRows);let completed=false;
+const fs=require('fs'),path=require('path');const [dir,transcript,rawRows,hook,delay,streaming]=process.argv.slice(2),rows=JSON.parse(rawRows);let completed=false;
+process.on('uncaughtException',error=>{fs.writeFileSync(path.join(dir,'fixture-error.txt'),error.stack);process.exit(1);});
 const append=entry=>fs.appendFileSync(transcript,JSON.stringify(entry)+'\\n');
-if(Number(delay)>0){fs.writeFileSync(transcript,JSON.stringify(rows[0])+'\\n');fs.writeFileSync(path.join(dir,'stop.json'),hook);setTimeout(()=>{rows.slice(1).forEach(append);completed=true;},Number(delay));}
+if(streaming==='true'){const progress={type:'system',sessionId:rows[0].sessionId,subtype:'fixture_progress',padding:'x'.repeat(80)};fs.writeFileSync(transcript,[rows[0],...Array(20000).fill(progress)].map(JSON.stringify).join('\\n')+'\\n');fs.writeFileSync(path.join(dir,'stop.json'),hook);const writer=setInterval(()=>append(progress),5);setTimeout(()=>{clearInterval(writer);rows.slice(1).forEach(append);completed=true;},Number(delay));}
+else if(Number(delay)>0){fs.writeFileSync(transcript,JSON.stringify(rows[0])+'\\n');fs.writeFileSync(path.join(dir,'stop.json'),hook);setTimeout(()=>{rows.slice(1).forEach(append);completed=true;},Number(delay));}
 else {fs.writeFileSync(transcript,rows.map(JSON.stringify).join('\\n')+'\\n');fs.writeFileSync(path.join(dir,'stop.json'),hook);completed=true;}
 require('readline').createInterface({input:process.stdin}).on('line',line=>{if(line.trim()==='/exit'){if(!completed)process.exit(12);append({type:'user',sessionId:rows[0].sessionId,message:{content:'<command-name>/exit</command-name>\\n<command-message>exit</command-message>\\n<command-args></command-args>'}});append({type:'user',sessionId:rows[0].sessionId,message:{content:'<local-command-stdout>See ya!</local-command-stdout>'}});process.exit(0);}});
 setTimeout(()=>process.exit(8),5000);`);
     const task=join(dir,'visible-task.json');
-    await writeFile(task,JSON.stringify({executable:exe,cwd:dir,arguments:[script,dir,transcript,JSON.stringify(rows),JSON.stringify(hook),String(delayCompletion)],environment:process.env,sessionId,question,mode:'visible'}));
+    await writeFile(task,JSON.stringify({executable:exe,cwd:dir,arguments:[script,dir,transcript,JSON.stringify(rows),JSON.stringify(hook),String(delayCompletion),String(streaming)],environment:process.env,sessionId,question,mode:'visible'}));
     const visible=spawn(host,['--task',task],{shell:false,detached:true,windowsHide:true,stdio:'ignore'});
     const code=await new Promise<number|null>((resolve,reject)=>{const timer=setTimeout(()=>{visible.kill();reject(new Error('Visible fixture timed out'));},10000);visible.once('error',error=>{clearTimeout(timer);reject(error);});visible.once('close',result=>{clearTimeout(timer);resolve(result);});});
-    return {code,error:await readFile(join(dir,'error.txt'),'utf8').catch(()=>''),result:await readFile(join(dir,'result.json'),'utf8').then(JSON.parse).catch(()=>undefined),sessionId};
+    return {code,error:(await Promise.all(['error.txt','fixture-error.txt'].map(file=>readFile(join(dir,file),'utf8').catch(()=>'')))).join('\n'),result:await readFile(join(dir,'result.json'),'utf8').then(JSON.parse).catch(()=>undefined),sessionId};
   } finally { await rm(dir,{recursive:true,force:true,maxRetries:20,retryDelay:100}); }
 }
 
@@ -91,6 +93,10 @@ assert.equal(literal.code,0,literal.error);assert.deepEqual(literal.result,{answ
 
 const delayed=await visibleTranscript([{type:'assistant',message:{content:[{type:'text',text:'延迟写入的完整答案'}],stop_reason:'end_turn'}}],'延迟写入的完整答案',900);
 assert.equal(delayed.code,0,delayed.error);assert.equal(delayed.result.answer,'延迟写入的完整答案');
+
+const streamedAnswer='并发写入的完整答案';
+const streamed=await visibleTranscript([{type:'assistant',message:{content:[{type:'text',text:streamedAnswer}],stop_reason:'end_turn'}}],streamedAnswer,900,true);
+assert.equal(streamed.code,0,streamed.error);assert.equal(streamed.result.answer,streamedAnswer);
 
 const recoveredAnswer='后续完整答案';
 const recovered=await visibleTranscript([

@@ -75,12 +75,12 @@ if ((git rev-parse HEAD) -ne (git rev-parse origin/main)) { throw 'HEAD is not o
 if (git status --porcelain) { throw 'Working tree is not clean' }
 $notesFile = Join-Path $env:TEMP "claude-business-desk-v$version.md"
 # 将 CHANGELOG.md 中本版本小节的正文复制到 $notesFile；不要包含下一个版本标题或比较链接。
-git tag -a "v$version" -F $notesFile
+git tag -a "v$version" --cleanup=verbatim -F $notesFile
 git show "v$version" --no-patch
 git push origin "v$version"
 ```
 
-创建标签前必须打开 `$notesFile`，确认内容与 `CHANGELOG.md` 的本版本小节一致且非空。推送标签后，GitHub Actions 应校验标签与项目版本，重新构建和测试，生成 Windows ZIP 与 SHA-256 文件，并把 annotated tag 的正文复用为非草稿 GitHub Release 说明。不要同时手工创建同名 Release；不要移动或强制覆盖已推送的标签。发布后发现问题时，修复并递增版本号。
+`--cleanup=verbatim` 保留 Markdown 小标题，避免 Git 将以 `#` 开头的内容当作注释删除。创建标签前必须打开 `$notesFile`，确认内容与 `CHANGELOG.md` 的本版本小节一致且非空。推送标签后，GitHub Actions 应校验标签与项目版本，重新构建和测试，生成 Windows ZIP 与 SHA-256 文件，并把 annotated tag 的正文复用为非草稿 GitHub Release 说明。不要同时手工创建同名 Release；不要移动或强制覆盖已推送的标签。发布后发现问题时，修复并递增版本号。
 
 ## 6. Release 验收
 
