@@ -102,6 +102,12 @@ jobs:
       contents: write
     runs-on: windows-latest
     steps:
+      - name: Check out annotated release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
       - name: Download release files
         uses: actions/download-artifact@v4
         with:

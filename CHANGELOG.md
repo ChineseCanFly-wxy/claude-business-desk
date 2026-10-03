@@ -4,7 +4,18 @@
 
 ## [Unreleased]
 
-## [0.1.1] - 2026-10-03
+## [0.1.2] - 2026-10-03
+
+### Fixed
+- GitHub Release 任务检出对应完整 annotated 标签后再读取说明，修复仅下载构建包时无法生成版本说明的首次发布失败。
+
+### Added
+- 首个正式 Windows x64 版本，包含记录删除与账号隔离、连续追问及状态展示、可见终端自动回传、可编辑业务提示词等全部功能，以及 0.1.1 的并发写入修复。
+- Windows ZIP 自带 Node 与 .NET，完整解压后双击 `ClaudeBusinessDesk.Launcher.exe` 即可启动工作台；无需安装开发环境。
+- 管理主机需要安装并登录 Claude Code，在设置中配置其可执行文件路径；客户只通过浏览器访问问答入口。
+- 下载资产包括版本化 ZIP 与 SHA-256；每次构建均检查依赖完整性、原生执行和 EXE 实际启动。
+
+## [0.1.1] - 2026-10-03（发布流程未通过，未发布）
 
 ### Fixed
 - 修复可见终端回传时读取转录文件阻止 Claude 并发写入的问题：使用允许读写共享的有界快照，保留完整回答、会话和退出校验，避免偶发文件忙导致终端退出。
@@ -12,7 +23,7 @@
 - 保留版本标签说明中的 Markdown 小标题。
 
 ### Added
-- 首个正式 Windows x64 下载包，包含 0.1.0 记录的全部业务功能；GitHub 在干净 Windows 主机实际启动 EXE 验收管理端和客户入口，并提供 ZIP 与 SHA-256。
+- 准备 Windows x64 下载包，包含 0.1.0 记录的全部业务功能；GitHub 在干净 Windows 主机实际启动 EXE 验收管理端和客户入口，并提供 ZIP 与 SHA-256。
 
 ## [0.1.0] - 2026-10-03（构建未通过，未发布）
 
@@ -47,6 +58,7 @@
 - Claude 后台执行使用 `auto`，可见终端按管理员要求使用 `bypassPermissions`；取消与退出时通过 JobObject 清理子进程树。
 - 发行包排除用户数据、环境文件、数据库、token 和 Claude 登录凭证。
 
-[Unreleased]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.1.1...HEAD
-[0.1.1]: https://github.com/ChineseCanFly-wxy/claude-business-desk/releases/tag/v0.1.1
+[Unreleased]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/ChineseCanFly-wxy/claude-business-desk/releases/tag/v0.1.2
+[0.1.1]: https://github.com/ChineseCanFly-wxy/claude-business-desk/tree/v0.1.1
 [0.1.0]: https://github.com/ChineseCanFly-wxy/claude-business-desk/tree/v0.1.0
