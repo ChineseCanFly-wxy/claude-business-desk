@@ -18,6 +18,13 @@ internal static class Program
             catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
             return;
         }
+        if (StartupRegistration.Handle(args)) return;
+        if (args.Length != 0)
+        {
+            if (args.Length != 2 || args[0] != "--data-dir" || !Path.IsPathFullyQualified(args[1]) || args[1].StartsWith(@"\\") || args[1].Any(char.IsControl))
+            { Console.Error.WriteLine("Invalid launcher arguments."); Environment.ExitCode = 1; return; }
+            Environment.SetEnvironmentVariable("DESK_DATA_DIR", Path.GetFullPath(args[1]));
+        }
         ApplicationConfiguration.Initialize();
         using var single = new Mutex(true, "Local\\ClaudeBusinessDeskLauncher", out bool first);
         if (!first) { Report("沐雨橙风已在托盘运行。"); return; }

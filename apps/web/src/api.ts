@@ -10,6 +10,7 @@ export type Conversation = ConversationSummary & { questions: Question[] };
 export type Detail = Question & { contextSnapshot?: ContextSnapshot };
 export type Page = { items: Question[]; total: number; page: number };
 export type Settings = { claudePath: string; mode: 'hidden' | 'visible'; timeoutSeconds: number; clientHost: string; clientPort: number; adminPort: number; allowInsecureLan: boolean; adminNotificationMode?: 'window' | 'notification'; fixedPrompt: string; extraPrompt: string; clientError?: string };
+export type StartupStatus = { available: boolean; enabled: boolean; currentLocation: boolean };
 export type Stats = { pendingQuestions: number; pendingAnswers: number; running: number; total: number; queued: number };
 let csrf = '';
 export function setCsrf(token?: string) { csrf = token || ''; }

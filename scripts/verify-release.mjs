@@ -10,7 +10,7 @@ const source = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 const packaged = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'));
 assert.equal(packaged.version, source.version, 'Packaged version must match package.json');
 assert.equal(packaged.type, 'module');
-for (const file of ['ClaudeBusinessDesk.Launcher.exe', 'ClaudeBusinessDesk.Launcher.dll', 'ClaudeBusinessDesk.Launcher.runtimeconfig.json', 'runtime/node.exe', 'dist/native/ClaudeTerminalHost.exe', 'dist/server/main.js', 'dist/web/index.html', 'README.md', 'CHANGELOG.md', 'LICENSE', 'docs/deployment.md', 'docs/RELEASING.md', 'scripts/启动.cmd', 'scripts/start.ps1']) {
+for (const file of ['ClaudeBusinessDesk.Launcher.exe', 'ClaudeBusinessDesk.Launcher.dll', 'ClaudeBusinessDesk.Launcher.runtimeconfig.json', 'runtime/node.exe', 'dist/native/ClaudeTerminalHost.exe', 'dist/native/DeskDialogHost.exe', 'dist/server/main.js', 'dist/web/index.html', 'README.md', 'CHANGELOG.md', 'LICENSE', 'docs/deployment.md', 'docs/RELEASING.md', 'scripts/启动.cmd', 'scripts/start.ps1']) {
   assert.ok((await stat(join(directory, file))).size > 0, 'Missing or empty release file: ' + file);
 }
 let files = 0;

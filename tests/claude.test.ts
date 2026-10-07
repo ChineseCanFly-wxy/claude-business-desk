@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { ClaudeProtocol, redactLog } from '../apps/server/src/claude/protocol.js';
-import { probeClaude, buildBusinessPrompt, validatePromptInput } from '../apps/server/src/claude/runner.js';
+import { claudeCandidates, discoverClaude, probeClaude, buildBusinessPrompt, validatePromptInput } from '../apps/server/src/claude/runner.js';
 import { buildNativeArguments, runNative } from '../apps/server/src/claude/native.js';
 import { validateBusinessAnswer } from '../apps/server/src/claude/prompt.js';
 test('every business prompt contains read-only question guidance alongside default or edited business instructions', () => {
@@ -121,6 +121,12 @@ test('diagnostic redaction removes bearer, keys, passwords and terminal escape c
   const redacted = redactLog('\x1b[31mBearer secret.token sk-ant-api03-secret password=hello access_token="private"\x1b[0m');
   for (const secret of ['secret.token', 'api03-secret', 'hello', 'private', '\x1b']) assert.ok(!redacted.includes(secret));
 });
+test('Claude discovery uses local install directories and PATH, never relative, network or desktop aliases', { skip: process.platform !== 'win32' }, async () => {
+  const candidates = claudeCandidates({ USERPROFILE: 'C:\\Users\\Desk', LOCALAPPDATA: 'C:\\Users\\Desk\\AppData\\Local', PATH: 'C:\\Tools; "C:\\With Space" ;.;relative;\\\\server\\share;C:\\Users\\Desk\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Tools' });
+  assert.deepEqual(candidates, ['C:\\Users\\Desk\\.local\\bin\\claude.exe', 'C:\\Users\\Desk\\AppData\\Local\\Microsoft\\WinGet\\Links\\claude.exe', 'C:\\Tools\\claude.exe', 'C:\\With Space\\claude.exe']);
+  assert.equal((await discoverClaude([])).path, null);
+  assert.equal((await discoverClaude([process.execPath])).path, null, 'an unrelated executable must not be selected');
+});
 test('background native runner completes automatically and rejects nonzero, incomplete and cancelled runs', { skip:process.platform!=='win32',timeout:60000 }, async () => {
   const base = await mkdtemp(join(tmpdir(),'desk-runner-fixture-'));
   try {
@@ -134,6 +140,8 @@ using System.Web.Script.Serialization;
 class Fixture {
   static int Main(string[] args) {
     Console.InputEncoding = new UTF8Encoding(false); Console.OutputEncoding = new UTF8Encoding(false);
+    if (args.Length == 1 && args[0] == "--version") { Console.WriteLine("2.1.99 (Claude Code)"); return 0; }
+    if (args.Length == 1 && args[0] == "--help") { Console.WriteLine("--output-format --verbose --include-partial-messages --session-id --resume --system-prompt-snapshot --permission-mode auto bypassPermissions --permission-prompts --append-system-prompt"); return 0; }
     int sessionIndex = Array.IndexOf(args,"--session-id");
     int modeIndex = Array.IndexOf(args,"--permission-mode"), promptsIndex = Array.IndexOf(args,"--permission-prompts");
     if (Array.IndexOf(args,"-p") < 0 || sessionIndex < 0 || modeIndex < 0 || args[modeIndex+1] != "auto" || promptsIndex < 0 || args[promptsIndex+1] != "none") return 3;
@@ -151,6 +159,8 @@ class Fixture {
     const compiler = join(process.env.SystemRoot!,'Microsoft.NET','Framework64','v4.0.30319','csc.exe');
     const compiled = spawnSync(compiler,['/nologo','/target:exe','/r:System.Web.Extensions.dll',`/out:${executable}`,source],{windowsHide:true,encoding:'utf8',timeout:30000});
     assert.equal(compiled.status,0,compiled.error?.message || compiled.stdout+compiled.stderr);
+    const discovered = await discoverClaude([join(base, 'missing.exe'), process.execPath, executable]);
+    assert.equal(discovered.path, executable); assert.equal(discovered.version, '2.1.99 (Claude Code)');
     const host = join(process.cwd(),'dist/native/ClaudeTerminalHost.exe');
     for (const question of ['后台中文问题','nonzero','incomplete','cancel','timeout']) {
       const dir = join(base,question);await mkdir(dir);

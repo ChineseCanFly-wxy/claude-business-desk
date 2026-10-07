@@ -28,3 +28,6 @@ launcher.token
 .vscode/
 Thumbs.db
 .DS_Store
+
+# Temporary Windows shell cache from native picker diagnostics
+/%SystemDrive%/

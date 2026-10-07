@@ -10,13 +10,14 @@ import { backup } from 'node:sqlite';
 import { Store, activeStates, defaultSettings } from './store.js';
 import { Service } from './service.js';
 import { digest, token, hashPassword, verifyPassword } from './auth.js';
-import { probeClaude, buildBusinessPrompt, validatePromptInput } from './claude/runner.js';
+import { discoverClaude, probeClaude, buildBusinessPrompt, validatePromptInput } from './claude/runner.js';
 import { validateBusinessAnswer } from './claude/prompt.js';
 import { contextSnapshotSchema, renderQuestionInput } from './context.js';
 import { recordVisibility, registerHistoryRoutes } from './history.js';
+import { selectNativePath, startupStatus } from './dialogs.js';
 
 const credentials = z.object({ username: z.string().trim().min(2).max(40).regex(/^[\p{L}\p{N}_.-]+$/u), password: z.string().min(1).max(128) });
-const settingsSchema = z.object({ claudePath: z.string().max(500), mode: z.enum(['hidden', 'visible']), timeoutSeconds: z.number().int().min(30).max(1800), clientHost: z.string().ip(), clientPort: z.number().int().min(1024).max(65535), adminPort: z.number().int().min(1024).max(65535), allowInsecureLan: z.boolean(), adminNotificationMode: z.enum(['window', 'notification']).default('window'), fixedPrompt: z.string().min(1).max(4000).refine(value => !!value.trim() && !value.includes('\0'), '固定业务提示词不能为空或包含空字符').default(defaultSettings.fixedPrompt), extraPrompt: z.string().max(4000) });
+const settingsSchema = z.object({ claudePath: z.string().max(500).refine(value => !/[\x00-\x1f]/.test(value), '路径不能包含控制字符'), mode: z.enum(['hidden', 'visible']), timeoutSeconds: z.number().int().min(30).max(1800), clientHost: z.string().ip(), clientPort: z.number().int().min(1024).max(65535), adminPort: z.number().int().min(1024).max(65535), allowInsecureLan: z.boolean(), adminNotificationMode: z.enum(['window', 'notification']).default('window'), fixedPrompt: z.string().min(1).max(4000).refine(value => !!value.trim() && !value.includes('\0'), '固定业务提示词不能为空或包含空字符').default(defaultSettings.fixedPrompt), extraPrompt: z.string().max(4000) });
 function fail(code: number, message: string): never { throw Object.assign(new Error(message), { statusCode: code }); }
 const usernameOf = (request: FastifyRequest) => (request as any).user as any;
 function projectPath(path: string) {
@@ -307,6 +308,29 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
       store.transaction(() => { store.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify(settings)); store.audit(usernameOf(request).id, 'settings', 'settings'); }); return { ok: true, restartRequired: true };
     });
     app.post('/api/settings/probe', async () => probeClaude(store.settings().claudePath));
+    app.post('/api/settings/discover', async request => {
+      z.object({}).strict().parse(request.body);
+      const found = await discoverClaude();
+      let saved = false;
+      if (found.path) store.transaction(() => {
+        const current = store.settings();
+        if (current.claudePath.trim()) return;
+        store.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify({ ...current, claudePath: found.path }));
+        store.audit(usernameOf(request).id, 'claude-discovery', 'settings'); saved = true;
+      });
+      return { ...found, saved };
+    });
+    app.get('/api/settings/startup', async () => startupStatus());
+    app.post('/api/settings/startup', async request => {
+      const { enabled } = z.object({ enabled: z.boolean() }).strict().parse(request.body);
+      const result = await startupStatus(enabled);
+      store.audit(usernameOf(request).id, 'startup', enabled ? 'enabled' : 'disabled');
+      return result;
+    });
+    app.post('/api/dialog', async request => {
+      const { kind, initialPath } = z.object({ kind: z.enum(['file', 'directory']), initialPath: z.string().max(500).refine(value => !/[\x00-\x1f]/.test(value) && !/^(?:\\\\|\/\/)/.test(value), '请选择本机路径') }).strict().parse(request.body);
+      return { path: await selectNativePath(kind, initialPath) };
+    });
     app.get('/api/export', async (_request, reply) => { reply.header('Content-Disposition', 'attachment; filename="desk-history.json"'); return { version: 3, formatVersion: 3, deletions: store.db.prepare('SELECT * FROM question_deletions').all(), conversations: store.db.prepare('SELECT * FROM conversations').all(), exportedAt: new Date().toISOString(), questions: store.db.prepare('SELECT * FROM questions').all(), runs: store.db.prepare('SELECT * FROM runs').all(), audit: store.db.prepare('SELECT * FROM audit').all() }; });
     app.get('/api/backup', async (_request, reply) => {
       const path = join(store.directory, `backup-${randomUUID()}.sqlite`);

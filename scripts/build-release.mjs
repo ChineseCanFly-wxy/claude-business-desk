@@ -47,6 +47,7 @@ await mkdir(path.join(staging, 'runtime'), { recursive: true });
 await cp(process.execPath, path.join(staging, 'runtime/node.exe'));
 for (const name of ['server', 'web']) await cp(path.join(root, 'dist', name), path.join(staging, 'dist', name), { recursive: true });
 run('dotnet', ['publish', 'apps/native-host/ClaudeTerminalHost.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-p:PublishSingleFile=true', ...dotnetVersion, '-o', path.join(staging, 'dist/native')], 'native host publish');
+run('dotnet', ['publish', 'apps/dialog-host/DeskDialogHost.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-p:PublishSingleFile=true', ...dotnetVersion, '-o', path.join(staging, 'dist/native')], 'path dialog publish');
 run('dotnet', ['publish', 'apps/launcher/ClaudeBusinessDesk.Launcher.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', ...dotnetVersion, '-o', staging], 'launcher publish');
 // Copy the complete dependency tree, including native bindings and transitive dependencies.
 await cp(path.join(root, 'node_modules'), path.join(staging, 'node_modules'), { recursive: true, dereference: true, filter: source => !['.claude', '.codex', '.git'].includes(path.basename(source)) });
@@ -55,7 +56,7 @@ await mkdir(path.join(staging, 'scripts'), { recursive: true });
 for (const name of ['启动.cmd', 'start.ps1']) await cp(path.join(root, 'scripts', name), path.join(staging, 'scripts', name));
 for (const name of ['README.md', 'CHANGELOG.md', 'LICENSE']) await cp(path.join(root, name), path.join(staging, name));
 await cp(path.join(root, 'docs'), path.join(staging, 'docs'), { recursive: true });
-for (const artifact of ['runtime/node.exe', 'dist/server/main.js', 'dist/web/index.html', 'dist/native/ClaudeTerminalHost.exe', 'ClaudeBusinessDesk.Launcher.exe', ...releaseDocuments]) {
+for (const artifact of ['runtime/node.exe', 'dist/server/main.js', 'dist/web/index.html', 'dist/native/ClaudeTerminalHost.exe', 'dist/native/DeskDialogHost.exe', 'ClaudeBusinessDesk.Launcher.exe', ...releaseDocuments]) {
   if (!(await exists(path.join(staging, artifact)))) throw new Error(`Incomplete staged release. Missing: ${artifact}`);
 }
 

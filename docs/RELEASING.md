@@ -43,10 +43,11 @@ npm test
 node scripts/build-release.mjs
 node scripts/verify-release.mjs
 .\scripts\check-notifications.ps1 -Launcher .\release\ClaudeBusinessDesk.Launcher.exe
+.\scripts\smoke-dialog.ps1 -DialogHost .\release\dist\native\DeskDialogHost.exe
 npx tsx scripts/native-smoke.ts
 ```
 
-确认 `release\ClaudeBusinessDesk.Launcher.exe`、服务、网页和原生宿主均已生成，`release\package.json` 的版本正确，且发行目录不含 `.env`、数据库、token、日志、Claude 登录信息或其他开发机数据。涉及页面、审核窗口、Windows 通知或内网访问的变化，还须在相应环境完成手动 smoke。
+确认 `release\ClaudeBusinessDesk.Launcher.exe`、服务、网页、原生宿主和路径选择器均已生成，`release\package.json` 的版本正确，且发行目录不含 `.env`、数据库、token、日志、Claude 登录信息或其他开发机数据。涉及页面、审核窗口、Windows 通知或内网访问的变化，还须在相应环境完成手动 smoke。
 
 `npx tsx scripts/smoke-claude.ts` 会真实调用 Claude 并可能产生费用；只有改动涉及真实 CLI 协议且用户明确同意时才运行。
 

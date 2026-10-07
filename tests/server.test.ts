@@ -216,7 +216,7 @@ test('server integration: approval, isolation, sessions, backup and safe cleanup
       assert.equal((await request(adminApp, adminSession, 'POST', '/api/settings', original)).statusCode, 200);
     });
 
-    await t.test('retired file dialog endpoint cannot open another popup', async () => {
+    await t.test('native path selection is administrator-only and validates input before opening a window', async () => {
       const payload = { kind: 'directory', initialPath: directory };
       const anonymous = await meta(adminApp);
       assert.equal((await request(adminApp, anonymous.session, 'POST', '/api/dialog', payload)).statusCode, 401);
@@ -225,9 +225,25 @@ test('server integration: approval, isolation, sessions, backup and safe cleanup
       for (const csrf of ['', 'incorrect']) assert.equal((await adminApp.inject({ method: 'POST', url: '/api/dialog', headers: { host: '127.0.0.1', cookie: adminSession.cookie, 'x-csrf-token': csrf }, payload })).statusCode, 403);
       for (const invalid of [{}, { kind: 'wrong', initialPath: '' }, { kind: 'file', initialPath: 1 }, { kind: 'directory', initialPath: 'x'.repeat(501) }, { kind: 'file', initialPath: 'bad\u0000path' }]) {
         const response = await request(adminApp, adminSession, 'POST', '/api/dialog', invalid);
-        assert.equal(response.statusCode, 404, response.body);
+        assert.equal(response.statusCode, 400, response.body);
       }
-      assert.equal((await request(adminApp, adminSession, 'POST', '/api/dialog', payload)).statusCode, 404);
+      assert.equal((await request(adminApp, adminSession, 'POST', '/api/dialog', { kind: 'directory', initialPath: '\\\\server\\share' })).statusCode, 400);
+    });
+
+    await t.test('desktop settings are administrator-only and startup status does not change stored data', async () => {
+      const original = store.settings();
+      const status = await request(adminApp, adminSession, 'GET', '/api/settings/startup');
+      assert.equal(status.statusCode, 200, status.body);
+      for (const field of ['available', 'enabled', 'currentLocation']) assert.equal(typeof status.json()[field], 'boolean');
+      assert.deepEqual(store.settings(), original);
+      for (const endpoint of ['/api/settings/startup', '/api/settings/discover']) {
+        assert.equal((await request(clientApp, clientSession, 'POST', endpoint, {})).statusCode, 404);
+        assert.equal((await request(adminApp, clientSession, 'POST', endpoint, {})).statusCode, 403);
+        assert.equal((await adminApp.inject({ method: 'POST', url: endpoint, headers: { host: '127.0.0.1', cookie: adminSession.cookie, 'x-csrf-token': 'incorrect' }, payload: {} })).statusCode, 403);
+      }
+      for (const body of [{}, { enabled: 'true' }, { enabled: true, path: 'untrusted' }]) assert.equal((await request(adminApp, adminSession, 'POST', '/api/settings/startup', body)).statusCode, 400);
+      assert.equal((await request(adminApp, adminSession, 'POST', '/api/settings/discover', { path: 'untrusted' })).statusCode, 400);
+      assert.deepEqual(store.settings(), original);
     });
 
     await t.test('launcher requires its token, not an admin browser session', async () => {

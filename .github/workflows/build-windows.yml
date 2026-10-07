@@ -54,6 +54,9 @@ jobs:
       - name: Check packaged launcher
         run: .\scripts\check-notifications.ps1 -Launcher .\release\ClaudeBusinessDesk.Launcher.exe
 
+      - name: Check packaged path selection
+        run: .\scripts\smoke-dialog.ps1 -DialogHost .\release\dist\native\DeskDialogHost.exe
+
       - name: Check packaged native execution
         shell: pwsh
         run: |

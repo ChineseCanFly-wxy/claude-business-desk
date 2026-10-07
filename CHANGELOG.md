@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-07
+
+### Added
+- 工作台设置可选择当前 Windows 用户登录后自动启动托盘和服务，默认关闭；读取实际启动项，支持关闭及更新搬动后的程序位置。
+- 未配置 Claude 路径时自动从本机安装目录和 PATH 查找、验证并保存，可重新查找且保留已有手动配置。
+- Claude EXE 与项目新建、编辑工作目录统一支持 Windows 原生浏览选择，取消保留原值，仅管理员可调用；完整 Windows 包包含路径选择程序。
+
 ## [0.1.2] - 2026-10-03
 
 ### Fixed
@@ -58,7 +65,8 @@
 - Claude 后台执行使用 `auto`，可见终端按管理员要求使用 `bypassPermissions`；取消与退出时通过 JobObject 清理子进程树。
 - 发行包排除用户数据、环境文件、数据库、token 和 Claude 登录凭证。
 
-[Unreleased]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/ChineseCanFly-wxy/claude-business-desk/releases/tag/v0.1.2
 [0.1.1]: https://github.com/ChineseCanFly-wxy/claude-business-desk/tree/v0.1.1
 [0.1.0]: https://github.com/ChineseCanFly-wxy/claude-business-desk/tree/v0.1.0

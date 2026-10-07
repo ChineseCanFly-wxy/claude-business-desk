@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { realpath, stat, mkdtemp, rm } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { delimiter, isAbsolute, join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
 import { runNative } from './native.js';
 import { validateBusinessInput } from './limits.js';
 import { buildBusinessPrompt } from './prompt.js';
@@ -75,6 +75,24 @@ export async function probeClaude(path: string): Promise<{ ok: boolean; version:
   } catch (error) {
     return { ok: false, version, message: redactLog(error instanceof Error ? error.message : 'CLI inspection failed') };
   }
+}
+
+export function claudeCandidates(environment: NodeJS.ProcessEnv = process.env): string[] {
+  const home = environment.USERPROFILE || homedir();
+  const paths = [join(home, '.local', 'bin'), environment.LOCALAPPDATA && join(environment.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links'), ...(environment.PATH || environment.Path || '').split(delimiter)];
+  return [...new Set(paths.filter((path): path is string => !!path).map(path => path.trim().replace(/^"(.*)"$/, '$1')).filter(path => isAbsolute(path) && !/^(?:\\\\|\/\/)/.test(path) && !/[\x00-\x1f]/.test(path) && !/[\\/]WindowsApps(?:[\\/]|$)/i.test(path)).map(path => join(path, 'claude.exe')))];
+}
+
+export async function discoverClaude(candidates = claudeCandidates()): Promise<{ path: string | null; version: string; message: string }> {
+  let incompatible = false;
+  for (const candidate of candidates) {
+    let path: string;
+    try { path = await executable(candidate); } catch { continue; }
+    const result = await probeClaude(path);
+    if (result.ok) return { path, version: result.version, message: '已找到并验证 Claude Code，可保存此路径' };
+    incompatible = true;
+  }
+  return { path: null, version: '', message: incompatible ? '找到了 Claude 程序，但当前版本不支持所需功能，请更新 Claude Code 后重新查找' : '未找到可用的 Claude Code，请先安装，或通过浏览选择已安装的 EXE' };
 }
 
 async function privateDirectory(): Promise<string> {
