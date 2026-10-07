@@ -1,5 +1,5 @@
 import test from 'node:test';
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, writeFile, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -160,7 +160,7 @@ class Fixture {
     const compiled = spawnSync(compiler,['/nologo','/target:exe','/r:System.Web.Extensions.dll',`/out:${executable}`,source],{windowsHide:true,encoding:'utf8',timeout:30000});
     assert.equal(compiled.status,0,compiled.error?.message || compiled.stdout+compiled.stderr);
     const discovered = await discoverClaude([join(base, 'missing.exe'), process.execPath, executable]);
-    assert.equal(discovered.path, executable); assert.equal(discovered.version, '2.1.99 (Claude Code)');
+    assert.equal(discovered.path, await realpath(executable)); assert.equal(discovered.version, '2.1.99 (Claude Code)');
     const host = join(process.cwd(),'dist/native/ClaudeTerminalHost.exe');
     for (const question of ['后台中文问题','nonzero','incomplete','cancel','timeout']) {
       const dir = join(base,question);await mkdir(dir);
