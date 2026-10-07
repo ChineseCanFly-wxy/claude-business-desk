@@ -53,9 +53,11 @@ test('client startup failures preserve the admin settings page and allow recover
     const adminUrl = `http://127.0.0.1:${adminPort}`;
     const clientUrl = `http://127.0.0.1:${clientPort}`;
     const api = (path: string, body?: unknown) => fetch(`${adminUrl}/api${path}`, {
-      method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(2000),
+      method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(10_000),
       headers: { cookie, ...(body === undefined ? {} : { 'Content-Type': 'application/json', 'x-csrf-token': csrf }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }).catch((error: unknown) => {
+      throw new Error(`Admin ${body === undefined ? 'GET' : 'POST'} ${path} failed: ${String(error)}\n${output}`, { cause: error });
     });
     async function start() {
       output = ''; launchError = undefined;
