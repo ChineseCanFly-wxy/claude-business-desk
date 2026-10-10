@@ -13,7 +13,7 @@ export class Store {
     mkdirSync(directory, { recursive: true });
     this.db = new DatabaseSync(join(directory, 'desk.sqlite'));
     const version = (this.db.prepare('PRAGMA user_version').get() as any).user_version;
-    if (version > 3) { this.db.close(); throw new Error(`数据库版本 ${version} 高于当前支持版本 3，拒绝打开`); }
+    if (version > 4) { this.db.close(); throw new Error(`数据库版本 ${version} 高于当前支持版本 4，拒绝打开`); }
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
     try { this.transaction(() => {
     this.db.exec(`
@@ -50,6 +50,13 @@ export class Store {
         ALTER TABLE conversations ADD COLUMN claude_session_id TEXT;
         ALTER TABLE conversations ADD COLUMN claude_session_path TEXT;
         PRAGMA user_version=3;`);
+    }
+    if (version < 4) {
+      this.db.exec(`CREATE TABLE attachments(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),project_id TEXT NOT NULL REFERENCES projects(id),question_id TEXT REFERENCES questions(id),name TEXT NOT NULL,mime TEXT NOT NULL,size INTEGER NOT NULL,sha256 TEXT NOT NULL,data BLOB NOT NULL,prepared TEXT NOT NULL,created_at TEXT NOT NULL);
+        CREATE INDEX attachment_questions ON attachments(question_id);
+        CREATE INDEX attachment_owners ON attachments(user_id,question_id);
+        ALTER TABLE runs ADD COLUMN attachment_reads TEXT NOT NULL DEFAULT '[]';
+        PRAGMA user_version=4;`);
     }
     this.db.prepare('INSERT OR IGNORE INTO settings(id,value) VALUES(1,?)').run(JSON.stringify(defaultSettings));
     }); } catch (error) { this.db.close(); throw error; }

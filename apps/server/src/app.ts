@@ -15,6 +15,7 @@ import { validateBusinessAnswer } from './claude/prompt.js';
 import { contextSnapshotSchema, renderQuestionInput } from './context.js';
 import { recordVisibility, registerHistoryRoutes } from './history.js';
 import { selectNativePath, startupStatus } from './dialogs.js';
+import { registerAttachmentRoutes, attachmentIdsSchema, attachmentMetadata, inheritedAttachmentIds, bindAttachments } from './attachments.js';
 
 const credentials = z.object({ username: z.string().trim().min(2).max(40).regex(/^[\p{L}\p{N}_.-]+$/u), password: z.string().min(1).max(128) });
 const settingsSchema = z.object({ claudePath: z.string().max(500).refine(value => !/[\x00-\x1f]/.test(value), '路径不能包含控制字符'), mode: z.enum(['hidden', 'visible']), timeoutSeconds: z.number().int().min(30).max(1800), clientHost: z.string().ip(), clientPort: z.number().int().min(1024).max(65535), adminPort: z.number().int().min(1024).max(65535), allowInsecureLan: z.boolean(), adminNotificationMode: z.enum(['window', 'notification']).default('window'), fixedPrompt: z.string().min(1).max(4000).refine(value => !!value.trim() && !value.includes('\0'), '固定业务提示词不能为空或包含空字符').default(defaultSettings.fixedPrompt), extraPrompt: z.string().max(4000) });
@@ -65,7 +66,7 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('X-Frame-Options', 'DENY');
     reply.header('Referrer-Policy', 'same-origin');
-    reply.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    if (!reply.hasHeader('Content-Security-Policy')) reply.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
   });
   app.get('/api/meta', async (request, reply) => {
     const csrf = usernameOf(request)?.csrfToken ?? request.cookies[`${cookieName}_csrf`] ?? token();
@@ -112,7 +113,8 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
     return row;
   }
   function present(row: any) {
-    return { id: row.id, conversationId: row.conversation_id, turnIndex: row.turn_index, parentQuestionId: row.parent_question_id, ...(portal === 'admin' ? { contextSnapshot: contextSnapshotSchema.parse(JSON.parse(row.context_snapshot)) } : {}), projectId: row.project_id, projectName: row.project_name, username: row.username, question: row.question, status: row.status, answer: row.status === 'answered' ? row.answer : undefined, ...(portal === 'admin' ? { draftAnswer: row.draft_answer, error: row.error } : { error: row.status === 'failed' ? '处理失败，请联系管理员' : row.status === 'rejected' ? (row.error || '管理员拒绝了此问题') : undefined }), archived: !!row.archived, createdAt: row.created_at, updatedAt: row.updated_at };
+    const snapshot = contextSnapshotSchema.parse(JSON.parse(row.context_snapshot));
+    return { attachments: attachmentMetadata(store, row.id), referenceAttachments: attachmentMetadata(store, row.id, snapshot.attachmentIds ?? []), id: row.id, conversationId: row.conversation_id, turnIndex: row.turn_index, parentQuestionId: row.parent_question_id, ...(portal === 'admin' ? { contextSnapshot: contextSnapshotSchema.parse(JSON.parse(row.context_snapshot)) } : {}), projectId: row.project_id, projectName: row.project_name, username: row.username, question: row.question, status: row.status, answer: row.status === 'answered' ? row.answer : undefined, ...(portal === 'admin' ? { draftAnswer: row.draft_answer, error: row.error } : { error: row.status === 'failed' ? '处理失败，请联系管理员' : row.status === 'rejected' ? (row.error || '管理员拒绝了此问题') : undefined }), archived: !!row.archived, createdAt: row.created_at, updatedAt: row.updated_at };
   }
   app.get('/api/questions', async request => {
     const query = z.object({ page: z.coerce.number().int().min(1).max(10000).default(1), status: z.string().max(50).optional() }).parse(request.query);
@@ -125,6 +127,7 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
     return { items: rows.map(present), total, page: query.page };
   });
   registerHistoryRoutes(app, store, service, portal, usernameOf);
+  registerAttachmentRoutes(app, store, portal, usernameOf);
   const visibleQuestions = `WITH visible_questions AS (SELECT * FROM questions q WHERE ${recordVisibility()})`;
   const conversationSelect = `${visibleQuestions} SELECT c.*,p.name project_name,u.username,
     (SELECT question FROM visible_questions WHERE conversation_id=c.id ORDER BY turn_index LIMIT 1) title,
@@ -168,7 +171,7 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
     return present(q);
   });
   if (portal === 'client') app.post('/api/questions', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async request => {
-    const body = z.object({ projectId: z.string().uuid(), question: z.string().trim().min(2).max(4000), conversationId: z.string().uuid().optional(), latestTurnId: z.string().uuid().optional() }).refine(value => !!value.conversationId === !!value.latestTurnId, { message: '追问必须同时提供对话与最新轮次' }).parse(request.body);
+    const body = z.object({ projectId: z.string().uuid(), question: z.string().trim().min(2).max(4000), attachmentIds: attachmentIdsSchema, conversationId: z.string().uuid().optional(), latestTurnId: z.string().uuid().optional() }).refine(value => !!value.conversationId === !!value.latestTurnId, { message: '追问必须同时提供对话与最新轮次' }).parse(request.body);
     const id = randomUUID(), now = new Date().toISOString();
     store.transaction(() => {
       if (!store.db.prepare('SELECT 1 FROM projects p JOIN grants g ON g.project_id=p.id WHERE p.id=? AND g.user_id=? AND p.enabled=1').get(body.projectId, usernameOf(request).id)) fail(403, '没有项目权限');
@@ -188,12 +191,14 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
         parentQuestionId = latest.id;
       }
       const turns = store.db.prepare("SELECT id questionId,turn_index turnIndex,question,answer FROM questions WHERE conversation_id=? AND status='answered' ORDER BY turn_index").all(conversationId) as any[];
-      const snapshot = contextSnapshotSchema.parse({ formatVersion: 1, sourceIds: turns.map(turn => turn.questionId), turns });
+      const references = inheritedAttachmentIds(store, turns.map(turn => turn.questionId));
+      const snapshot = contextSnapshotSchema.parse({ formatVersion: 1, sourceIds: turns.map(turn => turn.questionId), turns, ...(references.length ? { attachmentIds: references } : {}) });
       const settings = store.settings();
       try { validatePromptInput(renderQuestionInput(body.question, snapshot), settings.extraPrompt, settings.claudePath, settings.fixedPrompt); }
       catch (error) { fail(413, error instanceof Error ? error.message : '对话上下文过长，请开启新对话'); }
       if (!body.conversationId) store.db.prepare('INSERT INTO conversations(id,user_id,project_id,created_at) VALUES(?,?,?,?)').run(conversationId, usernameOf(request).id, body.projectId, now);
       store.db.prepare('INSERT INTO questions(id,user_id,project_id,question,status,created_at,updated_at,conversation_id,turn_index,parent_question_id,context_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(id, usernameOf(request).id, body.projectId, body.question, 'pending_question_review', now, now, conversationId, turnIndex, parentQuestionId, JSON.stringify(snapshot));
+      bindAttachments(store, body.attachmentIds, references, id, usernameOf(request).id, body.projectId);
       store.audit(usernameOf(request).id, 'submit', id);
     }); service.notify(); return present(getQuestion(id, request));
   });
@@ -331,7 +336,7 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
       const { kind, initialPath } = z.object({ kind: z.enum(['file', 'directory']), initialPath: z.string().max(500).refine(value => !/[\x00-\x1f]/.test(value) && !/^(?:\\\\|\/\/)/.test(value), '请选择本机路径') }).strict().parse(request.body);
       return { path: await selectNativePath(kind, initialPath) };
     });
-    app.get('/api/export', async (_request, reply) => { reply.header('Content-Disposition', 'attachment; filename="desk-history.json"'); return { version: 3, formatVersion: 3, deletions: store.db.prepare('SELECT * FROM question_deletions').all(), conversations: store.db.prepare('SELECT * FROM conversations').all(), exportedAt: new Date().toISOString(), questions: store.db.prepare('SELECT * FROM questions').all(), runs: store.db.prepare('SELECT * FROM runs').all(), audit: store.db.prepare('SELECT * FROM audit').all() }; });
+    app.get('/api/export', async (_request, reply) => { reply.header('Content-Disposition', 'attachment; filename="desk-history.json"'); return { version: 4, formatVersion: 4, attachments: store.db.prepare('SELECT id,user_id,project_id,question_id,name,mime,size,sha256,created_at FROM attachments').all(), deletions: store.db.prepare('SELECT * FROM question_deletions').all(), conversations: store.db.prepare('SELECT * FROM conversations').all(), exportedAt: new Date().toISOString(), questions: store.db.prepare('SELECT * FROM questions').all(), runs: store.db.prepare('SELECT * FROM runs').all(), audit: store.db.prepare('SELECT * FROM audit').all() }; });
     app.get('/api/backup', async (_request, reply) => {
       const path = join(store.directory, `backup-${randomUUID()}.sqlite`);
       await backup(store.db, path);

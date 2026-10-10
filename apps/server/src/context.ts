@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const contextSnapshotSchema = z.object({
   formatVersion: z.literal(1),
   sourceIds: z.array(z.string().uuid()),
+  attachmentIds: z.array(z.string().uuid()).max(10).optional(),
   turns: z.array(z.object({ questionId: z.string().uuid(), turnIndex: z.number().int().positive(), question: z.string(), answer: z.string() }).strict()),
 }).strict().superRefine((snapshot, ctx) => {
   if (snapshot.sourceIds.length !== snapshot.turns.length || snapshot.turns.some((turn, index) => turn.questionId !== snapshot.sourceIds[index] || (index > 0 && turn.turnIndex <= snapshot.turns[index - 1].turnIndex))) ctx.addIssue({ code: 'custom', message: '上下文来源或轮次无效' });

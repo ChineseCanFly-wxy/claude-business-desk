@@ -1,14 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, LoaderCircle, MessageSquare, Plus, Send, LockKeyhole, Trash2 } from 'lucide-react';
-import { api, ApiError, statusLabels, unfinished, type Conversation, type ConversationPage, type Page, type Project, type Question } from './api';
+import { api, ApiError, statusLabels, unfinished, type Attachment, type Conversation, type ConversationPage, type Page, type Project, type Question } from './api';
 import { AnswerNotifications, answeredSnapshot } from './answer-notifications';
 import { persistConversation, restoreConversation, validConversationId } from './conversation-selection';
 import { useHistoryDeletion } from './history-deletion';
+import { AttachmentList, AttachmentUpload } from './attachments';
 import { ConversationPreview, ConversationTimeline } from './conversation-presentation';
 
 function storage() { try { return window.localStorage; } catch { return undefined; } }
 const message = (e: unknown) => e instanceof Error ? e.message : '操作失败，请稍后重试。';
 export function ConversationClient({ userId, projects, revision, refresh, Popup }: { userId: string; projects: Project[]; revision: number; refresh: () => void; Popup: React.ComponentType<{ title: string; close: () => void; children: React.ReactNode }> }) {
+  const [attachments, setAttachments] = useState<Attachment[]>([]); const attachmentRef = useRef<Attachment[]>([]);
+  const [uploading, setUploading] = useState(false); const uploadRef = useRef(false);
+  const updateAttachments = (files: Attachment[]) => { attachmentRef.current = files; setAttachments(files); };
+  const clearAttachments = useCallback(() => { for (const file of attachmentRef.current) void api(`/attachments/${file.id}/remove`, {}).catch(() => {}); attachmentRef.current = []; setAttachments([]); }, []);
   const [selected, setSelected] = useState(() => restoreConversation(userId, window.location.search, storage()));
   const [conversation, setConversation] = useState<Conversation>();
   const [history, setHistory] = useState<ConversationPage>(); const [page, setPage] = useState(1);
@@ -20,13 +25,13 @@ export function ConversationClient({ userId, projects, revision, refresh, Popup 
   const selectedId = useRef(selected); const loadedId = useRef<string | undefined>(undefined);
   const [announcements, setAnnouncements] = useState<Question[]>([]); const notifications = useRef<AnswerNotifications | null>(null);
   const choose = useCallback((id?: string) => {
-    if (submitting.current) return;
-    if (!id || id !== selectedId.current) { selectedId.current = id; loadedId.current = undefined; setSelected(id); setCheckedTurns(new Set()); setDetailLoading(!!id); setConversation(undefined); setFollowing(false); setQuestion(''); setError(''); setDetailSyncError(''); }
+    if (submitting.current || uploadRef.current) return;
+    if (!id || id !== selectedId.current) { clearAttachments(); selectedId.current = id; loadedId.current = undefined; setSelected(id); setCheckedTurns(new Set()); setDetailLoading(!!id); setConversation(undefined); setFollowing(false); setQuestion(''); setError(''); setDetailSyncError(''); }
     persistConversation(userId, id, storage());
     const url = new URL(window.location.href); url.searchParams.delete('question');
     if (id) { url.searchParams.set('conversation', id); url.searchParams.delete('new'); } else { url.searchParams.delete('conversation'); url.searchParams.set('new', '1'); }
     window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
-  }, [userId]);
+  }, [userId, clearAttachments]);
   const deletion = useHistoryDeletion(async () => {
     setChecked(new Set()); setCheckedTurns(new Set()); setPage(1); setHistory(undefined);
     const id = selectedId.current;
@@ -69,10 +74,11 @@ export function ConversationClient({ userId, projects, revision, refresh, Popup 
   const eligibleTurns = (conversation?.questions ?? []).filter(q => !unfinished(q));
   const announcement = announcements[0];
   const dismiss = useCallback(() => { if (announcement) notifications.current?.acknowledge(announcement); setAnnouncements(q => q.slice(1)); }, [announcement]);
-  const locked = checking || active.length > 0 || busy || deletion.locked;
+  const locked = checking || active.length > 0 || busy || uploading || deletion.locked;
   const eligible = (history?.items ?? []).filter(c => !unfinished(c));
   const chosenProject = selected ? conversation?.projectId : projectId;
   const available = projects.some(p => p.id === chosenProject);
+  const references = [...new Map((conversation?.questions ?? []).filter(q => q.status === 'answered').flatMap(q => [...(q.attachments ?? []), ...(q.referenceAttachments ?? [])]).map(file => [file.id, file])).values()];
   const canFollow = !!conversation && !unfinished(conversation) && available && !detailLoading;
   return <div className="client-content">
     {announcement && !busy && <Popup title="你的问题已回复" close={dismiss}><section className="detail-section"><h3>你的问题</h3><div className="prose question-text">{announcement.question}</div></section><div className="form-actions"><button className="primary" onClick={() => { choose(announcement.conversationId); dismiss(); refresh(); }}>查看回复</button></div></Popup>}
@@ -97,10 +103,10 @@ export function ConversationClient({ userId, projects, revision, refresh, Popup 
         e.preventDefault(); if (locked || submitting.current || !chosenProject || !available || (selected && (!canFollow || !following))) return;
         const text = question.trim(); if (text.length < 2 || text.length > 4000) { setError('问题须为 2–4,000 字符（不计首尾空白）。'); return; }
         submitting.current = true; setBusy(true); setError('');
-        try { const result = await api<Question>('/questions', { projectId: chosenProject, question: text, ...(selected ? { conversationId: selected, latestTurnId: conversation!.latestTurnId } : {}) }); submitting.current = false; setChecking(true); setFollowing(false); setQuestion(''); choose(result.conversationId); refresh(); }
+        try { const result = await api<Question>('/questions', { projectId: chosenProject, question: text, attachmentIds: attachments.map(file => file.id), ...(selected ? { conversationId: selected, latestTurnId: conversation!.latestTurnId } : {}) }); attachmentRef.current = []; setAttachments([]); submitting.current = false; setChecking(true); setFollowing(false); setQuestion(''); choose(result.conversationId); refresh(); }
         catch (e) { setError(message(e)); refresh(); } finally { submitting.current = false; setBusy(false); }
-      }}><label>{selected ? '固定业务项目' : '选择业务项目'}<select required value={chosenProject || ''} disabled={!!selected || locked} onChange={e => setProjectId(e.target.value)}><option value="" disabled>请选择项目</option>{projects.map(p => <option value={p.id} key={p.id}>{p.name}</option>)}</select></label><label>{selected ? '你的追问' : '你的问题'}<textarea aria-label={selected ? '你的追问' : '你的问题'} rows={5} required minLength={2} maxLength={4000} value={question} disabled={locked || detailLoading} onChange={e => setQuestion(e.target.value)} placeholder="描述具体业务场景、目标和希望解决的问题。请勿提交密码或敏感凭据。"/></label><div className="compose-bottom"><span>{question.length} / 4,000 · 至少 2 字符</span><button className="primary" disabled={locked || detailLoading || !available || question.trim().length < 2 || (!!selected && !canFollow)}>{busy ? <LoaderCircle className="spin" size={17}/> : <Send size={17}/>} {selected ? '提交追问' : '提交新问题'}</button></div><p className="muted small">上下文过长时请开启新问题；系统不会静默截断历史。附加业务指令以执行时已保存配置为准。</p></form>}
-      {locked && <div className="info-note"><LockKeyhole size={17}/>{checking ? '正在确认所有对话的处理状态，暂时无法提交。' : '你仍有未完成的问题，所有对话暂时禁提交。开启新问题仅切换空白视图，不取消处理。'}</div>}
+      }}><label>{selected ? '固定业务项目' : '选择业务项目'}<select required value={chosenProject || ''} disabled={!!selected || locked} onChange={e => { clearAttachments(); setProjectId(e.target.value); }}><option value="" disabled>请选择项目</option>{projects.map(p => <option value={p.id} key={p.id}>{p.name}</option>)}</select></label><label>{selected ? '你的追问' : '你的问题'}<textarea aria-label={selected ? '你的追问' : '你的问题'} rows={5} required minLength={2} maxLength={4000} value={question} disabled={locked || detailLoading} onChange={e => setQuestion(e.target.value)} placeholder="描述具体业务场景、目标和希望解决的问题。请勿提交密码或敏感凭据。"/></label>{selected && <AttachmentList files={references} title="此前附件（本次追问继续引用）"/>}<AttachmentUpload projectId={chosenProject || ''} files={attachments} references={selected ? references : []} disabled={locked || detailLoading || !available} onChange={updateAttachments} onBusy={value => { uploadRef.current = value; setUploading(value); }}/><div className="compose-bottom"><span>{question.length} / 4,000 · 至少 2 字符</span><button className="primary" disabled={locked || detailLoading || !available || question.trim().length < 2 || (!!selected && !canFollow)}>{busy ? <LoaderCircle className="spin" size={17}/> : <Send size={17}/>} {selected ? '提交追问' : '提交新问题'}</button></div><p className="muted small">上下文过长时请开启新问题；系统不会静默截断历史。附加业务指令以执行时已保存配置为准。</p></form>}
+      {locked && !uploading && <div className="info-note"><LockKeyhole size={17}/>{checking ? '正在确认所有对话的处理状态，暂时无法提交。' : '你仍有未完成的问题，所有对话暂时禁提交。开启新问题仅切换空白视图，不取消处理。'}</div>}
       {active.map(q => <button key={q.id} className="text-button active-conversation" disabled={busy} onClick={() => choose(q.conversationId)}>查看正在处理的第 {q.turnIndex} 轮 · {statusLabels[q.status]}</button>)}
       {!projects.length && <p className="info-note">尚未分配可用项目，请联系管理员。</p>}
     </section></div>

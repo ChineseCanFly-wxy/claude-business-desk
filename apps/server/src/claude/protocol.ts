@@ -1,6 +1,6 @@
 import { StringDecoder } from 'node:string_decoder';
 
-export interface ClaudeResult { answer: string; sessionId?: string; costUsd?: number; exitCode: number }
+export interface ClaudeResult { answer: string; sessionId?: string; costUsd?: number; exitCode: number; readAttachmentIds?: string[] }
 const object = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /** Bounded NDJSON protocol reader. Partial messages are progress only; result is authoritative. */
@@ -11,7 +11,7 @@ export class ClaudeProtocol {
   private result?: Record<string, unknown>;
   private initialized = false;
   private ended = false;
-  constructor(private log: (text: string) => void = () => {}, private maxBytes = 16 * 1024 * 1024, private maxLineBytes = 1024 * 1024, private expectedSessionId?: string) {}
+  constructor(private log: (text: string) => void = () => {}, private maxBytes = 16 * 1024 * 1024, private maxLineBytes = 1024 * 1024, private expectedSessionId?: string, private observe?: (event: unknown) => void) {}
   push(chunk: Buffer): void {
     if (this.ended) throw new Error('Protocol already ended');
     this.bytes += chunk.length;
@@ -55,7 +55,9 @@ export class ClaudeProtocol {
       this.result = value;
     }
     // Never reconstruct the answer by concatenating partial and full assistant messages.
-    this.log(redactLog(line));
+    this.observe?.(value);
+    const safe = this.observe ? JSON.stringify(value, (_key, item) => object(item) && item.type === 'base64' && typeof item.data === 'string' ? { ...item, data: '[附件二进制内容已省略]' } : item) : line;
+    this.log(redactLog(safe));
   }
   finish(exitCode: number): ClaudeResult {
     this.consume(this.decoder.end());

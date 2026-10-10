@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { AttachmentReads } from '../apps/server/src/claude/attachment-reads.js';
 import { ClaudeProtocol } from '../apps/server/src/claude/protocol.js';
 // No model calls or user settings changes. Background execution finishes from the NDJSON result and natural exit.
 const host = process.env.CLAUDE_DESK_NATIVE_HOST || join(process.cwd(), 'dist/native/ClaudeTerminalHost.exe');
@@ -56,7 +57,7 @@ async function visibleTranscript(afterQuestion: object[], lastAssistantMessage: 
     // A real terminal input stream stays alive until the host automatically sends /exit.
     // Delayed completion proves Stop alone cannot prematurely finish a running turn.
     await writeFile(script,`const tty=require('tty');if(![0,1,2].every(fd=>tty.isatty(fd)))process.exit(9);
-const fs=require('fs'),path=require('path');const [dir,transcript,rawRows,hook,delay,streaming]=process.argv.slice(2),rows=JSON.parse(rawRows);let completed=false;
+const fs=require('fs'),path=require('path');const [dir,transcript,rowsFile,hook,delay,streaming]=process.argv.slice(2),rows=JSON.parse(fs.readFileSync(rowsFile,'utf8'));let completed=false;
 process.on('uncaughtException',error=>{fs.writeFileSync(path.join(dir,'fixture-error.txt'),error.stack);process.exit(1);});
 const append=entry=>fs.appendFileSync(transcript,JSON.stringify(entry)+'\\n');
 if(streaming==='true'){const progress={type:'system',sessionId:rows[0].sessionId,subtype:'fixture_progress',padding:'x'.repeat(80)};fs.writeFileSync(transcript,[rows[0],...Array(20000).fill(progress)].map(JSON.stringify).join('\\n')+'\\n');fs.writeFileSync(path.join(dir,'stop.json'),hook);const writer=setInterval(()=>append(progress),5);setTimeout(()=>{clearInterval(writer);rows.slice(1).forEach(append);completed=true;},Number(delay));}
@@ -64,8 +65,9 @@ else if(Number(delay)>0){fs.writeFileSync(transcript,JSON.stringify(rows[0])+'\\
 else {fs.writeFileSync(transcript,rows.map(JSON.stringify).join('\\n')+'\\n');fs.writeFileSync(path.join(dir,'stop.json'),hook);completed=true;}
 require('readline').createInterface({input:process.stdin}).on('line',line=>{if(line.trim()==='/exit'){if(!completed)process.exit(12);append({type:'user',sessionId:rows[0].sessionId,message:{content:'<command-name>/exit</command-name>\\n<command-message>exit</command-message>\\n<command-args></command-args>'}});append({type:'user',sessionId:rows[0].sessionId,message:{content:'<local-command-stdout>See ya!</local-command-stdout>'}});process.exit(0);}});
 setTimeout(()=>process.exit(8),5000);`);
+    const rowsFile=join(dir,'fixture-rows.json'); await writeFile(rowsFile,JSON.stringify(rows));
     const task=join(dir,'visible-task.json');
-    await writeFile(task,JSON.stringify({executable:exe,cwd:dir,arguments:[script,dir,transcript,JSON.stringify(rows),JSON.stringify(hook),String(delayCompletion),String(streaming)],environment:process.env,sessionId,question,mode:'visible'}));
+    await writeFile(task,JSON.stringify({executable:exe,cwd:dir,arguments:[script,dir,transcript,rowsFile,JSON.stringify(hook),String(delayCompletion),String(streaming)],environment:process.env,sessionId,question,mode:'visible'}));
     const visible=spawn(host,['--task',task],{shell:false,detached:true,windowsHide:true,stdio:'ignore'});
     const code=await new Promise<number|null>((resolve,reject)=>{const timer=setTimeout(()=>{visible.kill();reject(new Error('Visible fixture timed out'));},10000);visible.once('error',error=>{clearTimeout(timer);reject(error);});visible.once('close',result=>{clearTimeout(timer);resolve(result);});});
     return {code,error:(await Promise.all(['error.txt','fixture-error.txt'].map(file=>readFile(join(dir,file),'utf8').catch(()=>'')))).join('\n'),result:await readFile(join(dir,'result.json'),'utf8').then(JSON.parse).catch(()=>undefined),sessionId};
@@ -121,3 +123,17 @@ for (const [label,row] of [
   assert.notEqual(failed.code,0,`${label} must fail`);assert.match(failed.error,/Turn interrupted or failed/,label);
 }
 console.log('Native fixture passed: Unicode/quoted args, UTF-8 pipes, automatic NDJSON, Stop collection, automatic visible completion without manual /exit, delayed transcript validation and descendant cancellation. No model or visible window used.');
+
+const imageEvents = [
+  { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'read-image', name: 'Read', input: { file_path: 'fixture-image.png' } }] } },
+  { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'read-image', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(3 * 1024 * 1024) } }] }] } },
+  { type: 'assistant', message: { content: [{ type: 'text', text: '图片附件读取完成' }], stop_reason: 'end_turn' } },
+];
+const imageVisible = await visibleTranscript(imageEvents, '图片附件读取完成');
+assert.equal(imageVisible.code, 0, imageVisible.error); assert.equal(imageVisible.result.answer, '图片附件读取完成');
+
+const imageHidden = await fixture('const fs=require("fs");fs.readFileSync(0,"utf8");console.log(JSON.stringify({type:"system",subtype:"init",tools:["Read"],mcp_servers:[],permissionMode:"auto"}));console.log(JSON.stringify({type:"assistant",message:{content:[{type:"tool_use",name:"Read",id:"read",input:{file_path:"fixture-image.png"}}]}}));console.log(JSON.stringify({type:"user",message:{content:[{type:"tool_result",tool_use_id:"read",content:[{type:"image",source:{type:"base64",media_type:"image/png",data:"A".repeat(3*1024*1024)}}]}]}}));console.log(JSON.stringify({type:"result",subtype:"success",is_error:false,result:"图片已读取",session_id:"fixture"}));');
+const imageReads = new AttachmentReads([{ id: 'image', name: '图.png', paths: ['fixture-image.png'] }]);
+const imageProtocol = new ClaudeProtocol(() => {}, 64*1024*1024, 16*1024*1024, undefined, event => imageReads.observe(event)); imageProtocol.push(Buffer.from(imageHidden.out));
+assert.equal(imageProtocol.finish(imageHidden.code!).answer, '图片已读取'); assert.deepEqual(imageReads.completedIds(), ['image']);
+console.log('Native multimodal transcript and read receipts passed');

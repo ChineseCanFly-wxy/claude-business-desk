@@ -6,8 +6,8 @@ using System.Text.RegularExpressions;
 internal record TaskSpec(string Executable, string Cwd, string[] Arguments, Dictionary<string,string> Environment, string SessionId, string Question, string Mode);
 internal static class Program
 {
-    const long MaxTranscriptBytes = 32L * 1024 * 1024;
-    const int MaxTranscriptLineChars = 2 * 1024 * 1024;
+    const long MaxTranscriptBytes = 64L * 1024 * 1024;
+    const int MaxTranscriptLineChars = 16 * 1024 * 1024;
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool AllocConsole();
     [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int kind);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool WriteConsoleInput(IntPtr input, InputRecord[] records, uint count, out uint written);

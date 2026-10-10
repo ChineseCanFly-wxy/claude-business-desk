@@ -1,8 +1,9 @@
 export type User = { id: string; username: string; role: string; enabled?: boolean; projectIds?: string[] };
 export type Project = { id: string; name: string; description: string; path?: string; enabled: boolean };
 export type Status = 'pending_question_review' | 'queued' | 'running' | 'pending_answer_review' | 'answered' | 'rejected' | 'failed' | 'cancelled';
-export type Question = { conversationId: string; turnIndex: number; parentQuestionId?: string | null; id: string; projectId: string; projectName: string; username: string; question: string; status: Status; answer?: string; draftAnswer?: string; error?: string; createdAt: string; updatedAt: string; archived: boolean };
-export type ContextSnapshot = { formatVersion: 1; sourceIds: string[]; turns: { questionId: string; turnIndex: number; question: string; answer: string }[] };
+export type Attachment = { id: string; name: string; mime: string; size: number; readByAi: boolean; pageCount?: number; imageCount?: number };
+export type Question = { attachments?: Attachment[]; referenceAttachments?: Attachment[]; conversationId: string; turnIndex: number; parentQuestionId?: string | null; id: string; projectId: string; projectName: string; username: string; question: string; status: Status; answer?: string; draftAnswer?: string; error?: string; createdAt: string; updatedAt: string; archived: boolean };
+export type ContextSnapshot = { attachmentIds?: string[]; formatVersion: 1; sourceIds: string[]; turns: { questionId: string; turnIndex: number; question: string; answer: string }[] };
 export type ConversationTurnPreview = Pick<Question, 'id' | 'turnIndex' | 'question' | 'status'>;
 export type ConversationSummary = { id: string; projectId: string; projectName: string; username: string; title: string; titleTurnIndex: number; latestQuestion: string; latestVisibleTurnIndex: number; followupCount: number; turnPreviews: ConversationTurnPreview[]; latestTurnId: string; createdAt: string; updatedAt: string; status: Status; turnCount: number; archived: boolean };
 export type ConversationPage = { items: ConversationSummary[]; total: number; page: number };
@@ -25,3 +26,15 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
 }
 export const statusLabels: Record<Status, string> = { pending_question_review: '等待问题审核', queued: '排队中', running: '正在处理', pending_answer_review: '等待答案审核', answered: '已答复', rejected: '已拒绝', failed: '处理失败', cancelled: '已取消' };
 export const unfinished = (q: Pick<Question, 'status'>) => ['pending_question_review', 'queued', 'running', 'pending_answer_review'].includes(q.status);
+
+export async function uploadAttachment(projectId: string, file: File): Promise<Attachment> {
+  const response = await fetch(`/api/attachments?${new URLSearchParams({ projectId, name: file.name })}`, {
+    credentials: 'include', method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'x-csrf-token': csrf }, body: file,
+  });
+  const data = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    if (response.status === 401) window.dispatchEvent(new Event('session-expired'));
+    throw new ApiError(data?.message || `附件上传失败（${response.status}）`, response.status);
+  }
+  return data as Attachment;
+}

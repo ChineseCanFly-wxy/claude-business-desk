@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-10
+
+### Added
+- 客户提问及追问支持上传 PNG、JPG/JPEG、WebP 图片、Word DOCX 和未加密 PDF；每轮最多新增 5 个文件，单文件最多 10 MB，含历史引用合计最多 10 个、20 MB，PDF 最多 20 页。
+- 客户与管理员可预览附件、打开原文件；Word 提取正文、表格及内嵌图片，较长 PDF 自动分段交给 Claude 读取。
+- 逐轮核验 Claude Read 工具的成功回执，附件读取不完整时明确失败；审核与问答记录显示“AI 已读取”，同一对话的追问继续引用此前已发布轮次的附件。
+- 答案审核支持双击或点击“放大查看”打开大尺寸编辑窗口，修改同步保留，关闭后继续审核。
+
+### Fixed
+- 开机时尚未登录公司 VPN 或尚未获得配置的公司 IP 时保留管理端与处理服务，自动等待网络；IP 恢复后重新开放客户端，断线或端口占用后继续重试。
+- 网络等待期间保留原监听设置、访问限制和已运行 Claude 任务，连接信息不再显示不可访问的客户端地址。
+- 发版测试按文件串行执行，减少 Windows 原生进程冷启动及网络恢复测试争抢资源导致的偶发超时。
+
+### Changed
+- SQLite 自动升级到版本 4，附件原文件及转换内容随一致性数据库备份保存；JSON 导出增加附件元数据。升级后回退旧程序需要同时恢复升级前数据库快照。
+
+### Security
+- 附件访问验证登录账号、项目授权和记录可见性，提交后不可替换；转换设置文件类型、大小、内存与时间限制，不读取 Word 外部资源或执行宏及嵌入对象。
+- Claude 使用每轮受限临时目录中的附件，执行结束清理；管理员运行日志省略图片 Base64 数据，问题和答案仍分别经过人工审核。
+
 ## [0.2.1] - 2026-10-07
 
 ### Added
@@ -73,7 +93,8 @@
 - Claude 后台执行使用 `auto`，可见终端按管理员要求使用 `bypassPermissions`；取消与退出时通过 JobObject 清理子进程树。
 - 发行包排除用户数据、环境文件、数据库、token 和 Claude 登录凭证。
 
-[Unreleased]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.1.2...v0.2.1
 [0.2.0]: https://github.com/ChineseCanFly-wxy/claude-business-desk/tree/v0.2.0
 [0.1.2]: https://github.com/ChineseCanFly-wxy/claude-business-desk/releases/tag/v0.1.2

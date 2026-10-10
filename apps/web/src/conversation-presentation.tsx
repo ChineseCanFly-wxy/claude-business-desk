@@ -1,4 +1,5 @@
 import React from 'react';
+import { AttachmentList } from './attachments';
 import { ChevronRight, CornerDownRight, MessageSquare, MessagesSquare, Sparkles, Trash2 } from 'lucide-react';
 import { statusLabels, unfinished, type ConversationSummary, type Question, type Status } from './api';
 
@@ -35,6 +36,7 @@ export function ConversationTimeline({ questions, admin = false, controls }: { q
         <div className="dialogue-content"><div className="dialogue-heading"><div><div className="dialogue-title"><h3>{q.turnIndex === 1 ? '首次提问' : `第 ${q.turnIndex - 1} 次追问`}</h3><ConversationStatus status={q.status}/></div><span>第 {q.turnIndex} 轮 · {conversationDate(q.createdAt)}{q.archived && ' · 已归档'}</span></div><div className="dialogue-controls">{controls?.(q)}</div></div>
           {q.turnIndex > 1 && <p className="dialogue-connection"><CornerDownRight size={13}/>接着这段对话继续提问</p>}
           <div className="dialogue-question"><span className="dialogue-label">{admin ? q.username : '你'}的{q.turnIndex === 1 ? '问题' : '追问'}</span><div className="prose">{q.question}</div></div>
+          <AttachmentList files={q.attachments}/><AttachmentList files={q.referenceAttachments} title="此前引用的附件"/>
           {q.status === 'answered' && q.answer ? <div className="dialogue-answer"><span className="dialogue-label"><Sparkles size={14}/>正式答复</span><div className="prose answer-text">{q.answer}</div></div> : admin && q.status === 'pending_answer_review' && q.draftAnswer ? <div className="dialogue-draft"><span className="dialogue-label">待审核草稿 · 尚未发布</span><div className="prose">{q.draftAnswer}</div></div> : <p className="dialogue-pending">{q.status === 'rejected' ? '此轮未通过审核。' : q.status === 'failed' ? '此轮处理失败。' : q.status === 'cancelled' ? '此轮已取消。' : '本轮尚无已发布答案，处理进度将自动更新。'}{q.error && <span> {q.error}</span>}</p>}
         </div>
       </article>

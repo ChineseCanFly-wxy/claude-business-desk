@@ -2,6 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { runClaude, validatePromptInput, buildBusinessPrompt, type RunnerOptions } from './claude/runner.js';
 import { contextSnapshotSchema, renderQuestionInput } from './context.js';
+import { executionAttachments } from './attachments.js';
 export type Executor = (options: RunnerOptions) => ReturnType<typeof runClaude>;
 export class Service {
   listeners = new Set<() => void>();
@@ -44,21 +45,25 @@ export class Service {
       const settings = this.store.settings();
       const snapshot = contextSnapshotSchema.parse(JSON.parse(q.context_snapshot));
       const input = renderQuestionInput(q.question, snapshot);
+      const attachments = executionAttachments(this.store, q.id, snapshot.attachmentIds ?? [], q.user_id, q.project_id);
       const conversation = this.store.db.prepare('SELECT claude_session_id,claude_session_path FROM conversations WHERE id=? AND user_id=? AND project_id=?').get(q.conversation_id, q.user_id, q.project_id) as any;
       const resumeSessionId = conversation?.claude_session_path === q.path ? conversation.claude_session_id ?? undefined : undefined;
       // An execution mutates the CLI transcript. Only publication marks it reusable again;
       // interrupted, cancelled or rejected runs must not enter the next approved turn.
       this.store.db.prepare('UPDATE conversations SET claude_session_id=NULL,claude_session_path=NULL WHERE id=?').run(q.conversation_id);
-      this.store.db.prepare('UPDATE runs SET input_snapshot=? WHERE id=?').run(JSON.stringify({ formatVersion: 1, question: input, inputSha256: createHash('sha256').update(JSON.stringify({ question: input, systemPrompt: buildBusinessPrompt(settings.extraPrompt, settings.fixedPrompt) })).digest('hex'), contextSnapshot: snapshot, projectPath: q.path, resumeSessionId: resumeSessionId ?? null, systemPrompt: buildBusinessPrompt(settings.extraPrompt, settings.fixedPrompt), fixedPrompt: settings.fixedPrompt, extraPrompt: settings.extraPrompt, claudePath: settings.claudePath, mode: settings.mode }), id);
+      this.store.db.prepare('UPDATE runs SET input_snapshot=? WHERE id=?').run(JSON.stringify({ formatVersion: 1, question: input, attachments: attachments.map(({ id, name, mime, size, sha256 }) => ({ id, name, mime, size, sha256 })), inputSha256: createHash('sha256').update(JSON.stringify({ question: input, systemPrompt: buildBusinessPrompt(settings.extraPrompt, settings.fixedPrompt) })).digest('hex'), contextSnapshot: snapshot, projectPath: q.path, resumeSessionId: resumeSessionId ?? null, systemPrompt: buildBusinessPrompt(settings.extraPrompt, settings.fixedPrompt), fixedPrompt: settings.fixedPrompt, extraPrompt: settings.extraPrompt, claudePath: settings.claudePath, mode: settings.mode }), id);
       validatePromptInput(input, settings.extraPrompt, settings.claudePath, settings.fixedPrompt);
-      const result = await this.executor({ claudePath: settings.claudePath, projectPath: q.path, question: input, fixedPrompt: settings.fixedPrompt, extraPrompt: settings.extraPrompt, mode: settings.mode, resumeSessionId, timeoutSeconds: settings.timeoutSeconds, signal: controller.signal, onLog: text => {
+      const result = await this.executor({ claudePath: settings.claudePath, projectPath: q.path, question: input, fixedPrompt: settings.fixedPrompt, extraPrompt: settings.extraPrompt, mode: settings.mode, resumeSessionId, attachments, timeoutSeconds: settings.timeoutSeconds, signal: controller.signal, onLog: text => {
         logs = (logs + text + '\n').slice(-200_000);
         if (Date.now() - lastWrite > 500) { flush(); lastWrite = Date.now(); }
       } });
       if (controller.signal.aborted) throw new Error('已取消');
+      const missing = attachments.filter(file => !result.readAttachmentIds?.includes(file.id));
+      if (missing.length) throw new Error('AI 未成功读取附件：' + missing.map(file => file.name).join('、') + '。请确认文件可读后重试。');
       const now = new Date().toISOString();
       this.store.transaction(() => {
         flush();
+        this.store.db.prepare('UPDATE runs SET attachment_reads=? WHERE id=?').run(JSON.stringify(result.readAttachmentIds ?? []), id);
         this.store.db.prepare("UPDATE runs SET status='completed',ended_at=?,exit_code=?,session_id=?,cost_usd=? WHERE id=?").run(now, result.exitCode, result.sessionId ?? null, result.costUsd ?? null, id);
         this.store.db.prepare("UPDATE questions SET status='pending_answer_review',draft_answer=?,updated_at=? WHERE id=? AND status='running'").run(result.answer, now, q.id);
       });

@@ -6,8 +6,10 @@ import { ClaudeProtocol, redactLog, type ClaudeResult } from './protocol.js';
 import type { RunnerOptions } from './runner.js';
 import { buildBusinessPrompt } from './prompt.js';
 import { validateWindowsCommand } from './limits.js';
+import { AttachmentReads } from './attachment-reads.js';
 export async function buildNativeArguments(options: RunnerOptions, sessionId: string, dir: string, host: string): Promise<string[]> {
   const args = ['--permission-mode', options.mode === 'hidden' ? 'auto' : 'bypassPermissions', ...(options.resumeSessionId ? ['--resume', options.resumeSessionId] : ['--session-id', sessionId]), '--system-prompt-snapshot', 'off', '--append-system-prompt', buildBusinessPrompt(options.extraPrompt, options.fixedPrompt)];
+  if (options.attachmentDirectory) args.push('--add-dir', options.attachmentDirectory);
   if (options.mode === 'hidden') args.unshift('-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-prompts', 'none');
   else {
     const settings = join(dir, 'collector-settings.json');
@@ -20,7 +22,7 @@ export async function buildNativeArguments(options: RunnerOptions, sessionId: st
   return args;
 }
 
-async function visibleResult(path: string, sessionId: string): Promise<ClaudeResult> {
+async function visibleResult(path: string, sessionId: string, options: RunnerOptions, tracker: AttachmentReads): Promise<ClaudeResult> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, 'utf8')); }
   catch { throw new Error('可见 Claude 终端未生成可验证的最终答案，请在终端正常完成回答，系统会自动收取答案'); }
@@ -28,7 +30,13 @@ async function visibleResult(path: string, sessionId: string): Promise<ClaudeRes
   const result = value as Record<string, unknown>;
   if (result.sessionId !== sessionId || typeof result.answer !== 'string' || !result.answer.trim() || result.answer.length > 20000 || result.exitCode !== 0) throw new Error('Invalid native completion');
   if (result.costUsd !== undefined && (typeof result.costUsd !== 'number' || !Number.isFinite(result.costUsd) || result.costUsd < 0)) throw new Error('Invalid native completion');
-  return { answer: result.answer.trim(), sessionId, exitCode: 0, ...(typeof result.costUsd === 'number' ? { costUsd: result.costUsd } : {}) };
+  if (options.attachmentInputs?.length) {
+    const stop = JSON.parse(await readFile(join(path, '..', 'stop.json'), 'utf8'));
+    const { stat } = await import('node:fs/promises');
+    if (stop.session_id !== sessionId || typeof stop.transcript_path !== 'string' || !stop.transcript_path.endsWith(sessionId + '.jsonl') || (await stat(stop.transcript_path)).size > 64 * 1024 * 1024) throw new Error('无法核验附件读取记录');
+    tracker.observeTranscript(await readFile(stop.transcript_path, 'utf8'), options.question);
+  }
+  return { answer: result.answer.trim(), sessionId, exitCode: 0, ...(options.attachmentInputs?.length ? { readAttachmentIds: tracker.completedIds() } : {}), ...(typeof result.costUsd === 'number' ? { costUsd: result.costUsd } : {}) };
 }
 
 export async function runNative(options: RunnerOptions, cli: string, cwd: string, dir: string, host: string): Promise<ClaudeResult> {
@@ -38,7 +46,9 @@ export async function runNative(options: RunnerOptions, cli: string, cwd: string
   const env = { ...process.env }; delete env.CLAUDECODE;
   const task = join(dir, 'task.json');
   await writeFile(task, JSON.stringify({ executable: cli, cwd, arguments: args, environment: env, sessionId, question: options.question, mode: options.mode }), { flag: 'wx' });
-  const protocol = options.mode === 'hidden' ? new ClaudeProtocol(options.onLog, undefined, undefined, sessionId) : undefined;
+  const tracker = new AttachmentReads(options.attachmentInputs ?? []);
+  const hasAttachments = !!options.attachmentInputs?.length;
+  const protocol = options.mode === 'hidden' ? new ClaudeProtocol(options.onLog, hasAttachments ? 64 * 1024 * 1024 : undefined, hasAttachments ? 16 * 1024 * 1024 : undefined, sessionId, hasAttachments ? event => tracker.observe(event) : undefined) : undefined;
   return await new Promise<ClaudeResult>((resolve, reject) => {
     const child = spawn(host, ['--task', task], { shell: false, windowsHide: options.mode === 'hidden', detached: options.mode === 'visible', stdio: options.mode === 'hidden' ? ['ignore', 'pipe', 'pipe'] : 'ignore' });
     let failure: Error | undefined;
@@ -64,7 +74,7 @@ export async function runNative(options: RunnerOptions, cli: string, cwd: string
           const detail = await readFile(join(dir, 'error.txt'), 'utf8').catch(() => '');
           throw new Error(redactLog(detail || Buffer.concat(errors).toString()).slice(0, 2000) || `Native Claude terminal failed (exit ${code})`);
         }
-        resolve(options.mode === 'hidden' ? protocol!.finish(code) : await visibleResult(join(dir, 'result.json'), sessionId));
+        resolve(options.mode === 'hidden' ? { ...protocol!.finish(code), ...(hasAttachments ? { readAttachmentIds: tracker.completedIds() } : {}) } : await visibleResult(join(dir, 'result.json'), sessionId, options, tracker));
       } catch (error) { reject(error); }
     });
     if (options.signal.aborted) abort();

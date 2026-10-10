@@ -105,7 +105,7 @@ test('conversation replay is frozen published Q/A, independent new turns, isolat
     const snapshot = (await f.request('admin','GET',`/api/questions/${afterReject.id}`)).json().contextSnapshot;
     assert.deepEqual(snapshot.sourceIds,[first.id,second.id]);
     const exported = (await f.request('admin','GET','/api/export')).json();
-    assert.equal(exported.formatVersion,3); assert.equal(exported.conversations.length,2);
+    assert.equal(exported.formatVersion,4); assert.equal(exported.conversations.length,2);
     f.store.db.prepare('DELETE FROM grants WHERE user_id=?').run(f.owner);
     assert.equal((await f.request('client','GET','/api/conversations')).json().total,0);
     assert.equal((await f.request('client','GET',`/api/conversations/${first.conversationId}`)).statusCode,404);
@@ -379,9 +379,9 @@ test('legacy v1 migration preserves all rows and creates independent first turns
     assert.equal((store.db.prepare('SELECT COUNT(*) n FROM audit').get() as any).n,1);
     const snapshot = rows.map(q => q.conversation_id); store.close(); store = new Store(directory);
     assert.deepEqual((store.db.prepare('SELECT conversation_id FROM questions ORDER BY rowid').all() as any[]).map(q => q.conversation_id),snapshot);
-    store.db.exec('PRAGMA user_version=4'); store.close(); store = undefined;
+    store.db.exec('PRAGMA user_version=5'); store.close(); store = undefined;
     assert.throws(() => new Store(directory),/高于当前支持版本/);
-    const future = new DatabaseSync(join(directory,'desk.sqlite')); assert.equal((future.prepare('PRAGMA user_version').get() as any).user_version,4); future.close();
+    const future = new DatabaseSync(join(directory,'desk.sqlite')); assert.equal((future.prepare('PRAGMA user_version').get() as any).user_version,5); future.close();
   } finally { store?.close(); await rm(directory,{recursive:true,force:true}); }
 });
 
@@ -398,12 +398,12 @@ test('v2 upgrade preserves history and per-user deletion persists across restart
     store.db.prepare("INSERT INTO questions(id,user_id,project_id,conversation_id,question,status,answer,created_at,updated_at) VALUES(?,?,?,?,?,'answered',?,?,?)").run(question,owner,project,conversation,'Retained question','Retained answer',now,now);
     const saved = { ...store.settings(), mode: 'visible', extraPrompt: 'retained instructions' };
     store.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify(saved));
-    store.db.exec('DROP TABLE question_deletions; ALTER TABLE conversations DROP COLUMN claude_session_id; ALTER TABLE conversations DROP COLUMN claude_session_path; PRAGMA user_version=2;');
+    store.db.exec('DROP TABLE attachments; ALTER TABLE runs DROP COLUMN attachment_reads; DROP TABLE question_deletions; ALTER TABLE conversations DROP COLUMN claude_session_id; ALTER TABLE conversations DROP COLUMN claude_session_path; PRAGMA user_version=2;');
     store.close(); store = new Store(directory);
     assert.deepEqual(store.settings(), saved);
     assert.equal((store.db.prepare('SELECT answer FROM questions WHERE id=?').get(question) as any).answer,'Retained answer');
     assert.equal((store.db.prepare('SELECT claude_session_id FROM conversations WHERE id=?').get(conversation) as any).claude_session_id,null);
-    assert.equal((store.db.prepare('PRAGMA user_version').get() as any).user_version,3);
+    assert.equal((store.db.prepare('PRAGMA user_version').get() as any).user_version,4);
     store.db.prepare('INSERT INTO question_deletions VALUES(?,?,?)').run(owner,question,now);
     store.close(); store = new Store(directory);
     assert.equal((store.db.prepare('SELECT COUNT(*) n FROM question_deletions WHERE user_id=? AND question_id=?').get(owner,question) as any).n,1);

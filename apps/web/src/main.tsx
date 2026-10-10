@@ -6,6 +6,8 @@ import './styles.css';
 import { ConversationClient } from './conversation-client';
 import { ConversationHistory } from './conversation-history';
 import { ConversationCards } from './conversation-presentation';
+import { AttachmentList } from './attachments';
+import { AnswerEditor } from './answer-editor';
 
 const date = (value: string) => new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 const message = (error: unknown) => error instanceof Error ? error.message : '操作失败，请稍后重试。';
@@ -122,8 +124,9 @@ function QuestionDetail({ id, admin, revision, mutate, close, review = false, la
       <section className="detail-section"><h3><CircleHelp size={18}/>{detail.turnIndex === 1 ? '首次提问' : `第 ${detail.turnIndex - 1} 次追问`}（第 {detail.turnIndex} 轮）</h3><div className="prose question-text">{detail.question}</div></section>
       {detail.error && <ErrorBox text={detail.error}/>}
       <section className="detail-section"><h3><MessageSquare size={18}/>{admin && detail.status === 'pending_answer_review' ? 'Claude 返回答案' : '正式答复'}</h3>
-        {admin && detail.status === 'pending_answer_review' ? <><p className="muted">请用业务语言回复，只保留与问题相关的结论、依据和建议，不含代码、源码位置或执行命令。可直接编辑，确认后同意并发布；最多 20,000 字符。</p><textarea aria-label="Claude 返回答案，可编辑" maxLength={20000} rows={review ? 4 : 12} value={answer} onChange={e => { dirty.current = true; setAnswer(e.target.value); }}/></> : detail.answer ? <div className="prose answer-text">{detail.answer}</div> : <p className="muted">{detail.status === 'rejected' ? '问题未通过审核，请调整后重新提交。' : '暂无已发布答案，请耐心等待。'}</p>}
+        {admin && detail.status === 'pending_answer_review' ? <><p className="muted">请用业务语言回复，只保留与问题相关的结论、依据和建议，不含代码、源码位置或执行命令。可直接编辑，确认后同意并发布；最多 20,000 字符。</p><AnswerEditor rows={review ? 4 : 12} value={answer} onChange={value => { dirty.current = true; setAnswer(value); }}/></> : detail.answer ? <div className="prose answer-text">{detail.answer}</div> : <p className="muted">{detail.status === 'rejected' ? '问题未通过审核，请调整后重新提交。' : '暂无已发布答案，请耐心等待。'}</p>}
       </section>
+      <AttachmentList files={detail.attachments}/><AttachmentList files={detail.referenceAttachments} title="此前引用的附件"/>
       {admin && detail.contextSnapshot && (!review || detail.contextSnapshot.turns.length > 0) && <details className="detail-section frozen-context"><summary>此前已发布的问答</summary><p className="muted small">此轮处理参考提交时已发布的历史问答。</p>{detail.contextSnapshot.turns.length ? detail.contextSnapshot.turns.map(turn => <article className="context-turn" key={turn.questionId}><h4>第 {turn.turnIndex} 轮 · 问题</h4><div className="prose question-text">{turn.question}</div><h4>已发布答案</h4><div className="prose answer-text">{turn.answer}</div></article>) : <p className="muted">此轮没有此前已发布的问答上下文。</p>}</details>}
       {admin && detail.status !== 'pending_answer_review' && detail.draftAnswer && <details className="draft-preview"><summary>查看内部草稿（仅管理员）</summary><div className="prose">{detail.draftAnswer}</div></details>}
       {admin && <div className="detail-actions">

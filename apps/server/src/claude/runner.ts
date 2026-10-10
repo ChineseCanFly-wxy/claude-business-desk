@@ -3,6 +3,7 @@ import { realpath, stat, mkdtemp, rm } from 'node:fs/promises';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { runNative } from './native.js';
+import { materializeAttachments, attachmentPrompt, type ExecutionAttachment, type AttachmentInput } from '../attachments.js';
 import { validateBusinessInput } from './limits.js';
 import { buildBusinessPrompt } from './prompt.js';
 export { buildBusinessPrompt } from './prompt.js';
@@ -12,6 +13,9 @@ export interface RunnerOptions {
   claudePath: string;
   projectPath: string;
   question: string;
+  attachments?: ExecutionAttachment[];
+  attachmentInputs?: AttachmentInput[];
+  attachmentDirectory?: string;
   extraPrompt: string;
   /** Omitted by standalone tools to retain the default business instructions. */
   fixedPrompt?: string;
@@ -126,6 +130,10 @@ export async function runClaude(options: RunnerOptions): Promise<ClaudeResult> {
   const dir = await privateDirectory();
   try {
     const host = await executable(process.env.CLAUDE_DESK_NATIVE_HOST || join(process.cwd(), 'dist', 'native', 'ClaudeTerminalHost.exe'));
-    return await runNative(options, cli, cwd, dir, host);
+    const attachmentDirectory = join(dir, 'attachments');
+    const attachmentInputs = await materializeAttachments(options.attachments ?? [], attachmentDirectory);
+    const question = attachmentPrompt(options.question, attachmentInputs);
+    validatePromptInput(question, options.extraPrompt, options.claudePath, options.fixedPrompt);
+    return await runNative({ ...options, question, attachmentInputs, ...(attachmentInputs.length ? { attachmentDirectory } : {}) }, cli, cwd, dir, host);
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
