@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DEFAULT_BUSINESS_PROMPT } from './claude/prompt.js';
 
 export const activeStates = ['pending_question_review', 'queued', 'running', 'pending_answer_review'];
-export const defaultSettings = { claudePath: '', mode: 'hidden' as 'hidden' | 'visible', timeoutSeconds: 300, clientHost: '127.0.0.1', clientPort: 4311, adminPort: 4310, allowInsecureLan: false, adminNotificationMode: 'window' as 'window' | 'notification', fixedPrompt: DEFAULT_BUSINESS_PROMPT, extraPrompt: '' };
+export const defaultSettings = { claudePath: '', mode: 'hidden' as 'hidden' | 'visible', timeoutSeconds: 300, clientHost: '127.0.0.1', clientPort: 4311, adminPort: 4310, allowInsecureLan: false, adminNotificationMode: 'window' as 'window' | 'notification', adminAutoLogin: false, adminAutoLoginUserId: '', fixedPrompt: DEFAULT_BUSINESS_PROMPT, extraPrompt: '' };
 export type Settings = typeof defaultSettings;
 export class Store {
   db: DatabaseSync;

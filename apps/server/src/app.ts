@@ -7,6 +7,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { backup } from 'node:sqlite';
+import { isIP } from 'node:net';
 import { Store, activeStates, defaultSettings } from './store.js';
 import { Service } from './service.js';
 import { digest, token, hashPassword, verifyPassword } from './auth.js';
@@ -20,6 +21,7 @@ import { registerAttachmentRoutes, attachmentIdsSchema, attachmentMetadata, inhe
 const credentials = z.object({ username: z.string().trim().min(2).max(40).regex(/^[\p{L}\p{N}_.-]+$/u), password: z.string().min(1).max(128) });
 const settingsSchema = z.object({ claudePath: z.string().max(500).refine(value => !/[\x00-\x1f]/.test(value), '路径不能包含控制字符'), mode: z.enum(['hidden', 'visible']), timeoutSeconds: z.number().int().min(30).max(1800), clientHost: z.string().ip(), clientPort: z.number().int().min(1024).max(65535), adminPort: z.number().int().min(1024).max(65535), allowInsecureLan: z.boolean(), adminNotificationMode: z.enum(['window', 'notification']).default('window'), fixedPrompt: z.string().min(1).max(4000).refine(value => !!value.trim() && !value.includes('\0'), '固定业务提示词不能为空或包含空字符').default(defaultSettings.fixedPrompt), extraPrompt: z.string().max(4000) });
 function fail(code: number, message: string): never { throw Object.assign(new Error(message), { statusCode: code }); }
+function loopback(address: string) { return address === '::1' || (isIP(address) === 4 && address.startsWith('127.')) || (address.startsWith('::ffff:') && isIP(address.slice(7)) === 4 && address.slice(7).startsWith('127.')); }
 const usernameOf = (request: FastifyRequest) => (request as any).user as any;
 function projectPath(path: string) {
   if (/^(?:\\\\|\/\/)/.test(path)) fail(400, '不支持网络共享路径');
@@ -30,6 +32,44 @@ function projectPath(path: string) {
 export async function createApp(store: Store, service: Service, portal: 'admin' | 'client', launcherToken?: string) {
   const app = Fastify({ bodyLimit: 24 * 1024, logger: false, trustProxy: false, connectionTimeout: 15000, requestTimeout: 30000 });
   const cookieName = portal === 'admin' ? 'desk_admin' : 'desk_client';
+  // Native review cookies refer to an existing login; they cannot outlive or
+  // recreate it. Keep aliases in memory rather than persisting another session.
+  const reviewLogins = new Map<string, { parent: string; expires: number }>();
+  const autoLogins = new Map<string, { userId: string; csrf: string; expires: number }>();
+  const trustedAdmin = () => {
+    const settings = store.settings();
+    return portal === 'admin' && settings.adminAutoLogin
+      ? store.db.prepare("SELECT id,username,role FROM users WHERE id=? AND enabled=1 AND role='admin'").get(settings.adminAutoLoginUserId) as { id: string; username: string; role: string } | undefined
+      : undefined;
+  };
+  const issueAutoLogin = () => {
+    const user = trustedAdmin();
+    if (!user) return undefined;
+    const now = Date.now();
+    for (const [hash, session] of autoLogins) if (session.expires <= now || session.userId !== user.id) autoLogins.delete(hash);
+    while (autoLogins.size >= 128) autoLogins.delete(autoLogins.keys().next().value!);
+    const sessionToken = token(), expires = now + 8 * 3600_000;
+    autoLogins.set(digest(sessionToken), { userId: user.id, csrf: token(), expires });
+    return { sessionToken, expires };
+  };
+  const sessionHashOf = (request: FastifyRequest) => {
+    const hash = digest(request.cookies[cookieName] ?? '');
+    return portal === 'admin' ? reviewLogins.get(hash)?.parent ?? hash : hash;
+  };
+  const validSession = (hash: string) => {
+    const auto = portal === 'admin' ? autoLogins.get(hash) : undefined;
+    if (auto) {
+      const user = trustedAdmin();
+      return user?.id === auto.userId && auto.expires > Date.now()
+        ? { user_id: user.id, username: user.username, role: user.role, enabled: 1, csrf: auto.csrf, autoLogin: true }
+        : undefined;
+    }
+    return store.db.prepare('SELECT s.*,u.username,u.role,u.enabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>? AND s.portal=? AND u.enabled=1').get(hash, Date.now(), portal) as any;
+  };
+  const authenticateLauncher = (request: FastifyRequest) => {
+    const supplied = request.headers['x-launcher-token'];
+    if (!launcherToken || typeof supplied !== 'string' || digest(supplied) !== digest(launcherToken)) fail(401, '启动器认证失败');
+  };
   const eventSockets = new Set<import('node:http').ServerResponse>();
   const eventCounts = new Map<string, number>();
   app.addHook('preClose', async () => { for (const socket of eventSockets) socket.end(); eventSockets.clear(); });
@@ -43,12 +83,30 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
   });
   app.addHook('onRequest', async (request, reply) => {
     const host = request.headers.host?.split(':')[0]?.toLowerCase();
-    if (portal === 'admin' && host !== '127.0.0.1' && host !== 'localhost') fail(403, '管理入口只允许本机访问');
+    if (portal === 'admin' && (!['127.0.0.1', 'localhost'].includes(host ?? '') || !loopback(request.ip))) fail(403, '管理入口只允许本机访问');
     if (!request.url.startsWith('/api/')) return;
-    if (request.url === '/api/launcher/events') return;
-    const sessionCookie = request.cookies[cookieName];
-    const session = sessionCookie ? store.db.prepare('SELECT s.*,u.username,u.role,u.enabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE token=? AND expires>? AND portal=?').get(digest(sessionCookie), Date.now(), portal) as any : undefined;
-    if (session?.enabled && (portal !== 'admin' || session.role === 'admin')) (request as any).user = { id: session.user_id, username: session.username, role: session.role, csrfToken: session.csrf };
+    if (portal === 'admin') {
+      if (request.headers['sec-fetch-site'] === 'cross-site') fail(403, '请求来源不匹配');
+      const origin = request.headers.origin;
+      if (origin) {
+        try { if (new URL(origin).host !== request.headers.host) fail(403, '请求来源不匹配'); } catch { fail(403, '请求来源不匹配'); }
+      }
+    }
+    if (['/api/launcher/events', '/api/launcher/review-login'].includes(request.url.split('?')[0])) {
+      if (portal !== 'admin') fail(404, '接口不存在');
+      return;
+    }
+    let session = validSession(sessionHashOf(request));
+    // Bootstrap the local browser from the saved preference. Other APIs still
+    // require the resulting cookie and normal CSRF protection.
+    if (!session && portal === 'admin' && request.method === 'GET' && request.url.split('?')[0] === '/api/meta') {
+      const auto = issueAutoLogin();
+      if (auto) {
+        reply.setCookie(cookieName, auto.sessionToken, { path: '/', httpOnly: true, sameSite: 'strict', maxAge: 8 * 3600, secure: request.protocol === 'https' });
+        session = validSession(digest(auto.sessionToken));
+      }
+    }
+    if (session?.enabled && (portal !== 'admin' || session.role === 'admin')) (request as any).user = { id: session.user_id, username: session.username, role: session.role, csrfToken: session.csrf, ...(session.autoLogin ? { autoLogin: true } : {}) };
     if (!['GET', 'HEAD'].includes(request.method)) {
       const origin = request.headers.origin;
       if (origin) {
@@ -62,7 +120,8 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
     if (!publicPaths.includes(request.url.split('?')[0]) && !usernameOf(request)) fail(401, '请先登录');
     reply.header('Cache-Control', 'no-store');
   });
-  app.addHook('onSend', async (_request, reply) => {
+  app.addHook('onSend', async (request, reply) => {
+    if (request.url.startsWith('/api/')) reply.header('Cache-Control', 'no-store');
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('X-Frame-Options', 'DENY');
     reply.header('Referrer-Policy', 'same-origin');
@@ -71,7 +130,7 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
   app.get('/api/meta', async (request, reply) => {
     const csrf = usernameOf(request)?.csrfToken ?? request.cookies[`${cookieName}_csrf`] ?? token();
     reply.setCookie(`${cookieName}_csrf`, csrf, { httpOnly: true, sameSite: 'strict', path: '/', maxAge: 3600 });
-    return { portal, needsSetup: !store.db.prepare("SELECT 1 FROM users WHERE role='admin'").get(), csrfToken: csrf };
+    return { portal, needsSetup: !store.db.prepare("SELECT 1 FROM users WHERE role='admin'").get(), csrfToken: csrf, ...(portal === 'admin' ? { adminAutoLogin: !!trustedAdmin() } : {}) };
   });
   async function login(request: FastifyRequest, reply: any, user: any) {
     if ((portal === 'admin') !== (user.role === 'admin')) fail(401, '账号或密码错误');
@@ -100,7 +159,10 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
   });
   app.get('/api/me', async request => ({ user: { ...usernameOf(request), csrfToken: undefined }, csrfToken: usernameOf(request).csrfToken }));
   app.post('/api/logout', async (request, reply) => {
-    store.db.prepare('DELETE FROM sessions WHERE token=?').run(digest(request.cookies[cookieName] ?? ''));
+    const hash = sessionHashOf(request);
+    store.db.prepare('DELETE FROM sessions WHERE token=?').run(hash);
+    autoLogins.delete(hash);
+    for (const [alias, login] of reviewLogins) if (login.parent === hash) reviewLogins.delete(alias);
     reply.clearCookie(cookieName, { path: '/' }); return { ok: true };
   });
   app.get('/api/projects', async request => portal === 'admin'
@@ -204,7 +266,7 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
   });
   app.get('/api/events', async (request, reply) => {
     if (service.listeners.size >= 100) fail(429, '实时连接已满');
-    const user = usernameOf(request); const sessionHash = digest(request.cookies[cookieName] ?? '');
+    const user = usernameOf(request); const sessionHash = sessionHashOf(request);
     if ((eventCounts.get(user.id) ?? 0) >= 3) fail(429, '此账号的实时连接已满，请关闭多余页面');
     eventCounts.set(user.id, (eventCounts.get(user.id) ?? 0) + 1);
     reply.hijack(); reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -212,8 +274,8 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
     let closed = false;
     const update = (heartbeat = false) => {
       if (closed) return;
-      const valid = store.db.prepare('SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>? AND u.enabled=1').get(sessionHash, Date.now());
-      if (!valid) { reply.raw.end(); return; }
+      const valid = validSession(sessionHash);
+      if (!valid || (portal === 'admin' && valid.role !== 'admin')) { reply.raw.end(); return; }
       if (reply.raw.writableLength > 64_000) { reply.raw.end(); return; }
       reply.raw.write(heartbeat ? ': heartbeat\n\n' : `data: ${JSON.stringify({ type: 'refresh' })}\n\n`);
     };
@@ -301,7 +363,19 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
       service.notify(); return { ok: true };
     });
     app.get('/api/settings/prompt', async () => { const settings = store.settings(); return { fixedPrompt: settings.fixedPrompt, combinedPrompt: buildBusinessPrompt(settings.extraPrompt, settings.fixedPrompt) }; });
-    app.get('/api/settings', async () => ({ ...store.settings(), clientError: service.clientError }));
+    app.get('/api/settings', async () => { const { adminAutoLoginUserId: _owner, ...settings } = store.settings(); return { ...settings, clientError: service.clientError }; });
+    app.post('/api/settings/admin-auto-login', async request => {
+      const { enabled } = z.object({ enabled: z.boolean() }).strict().parse(request.body);
+      const current = store.settings();
+      const userId = enabled ? (current.adminAutoLogin && trustedAdmin() ? current.adminAutoLoginUserId : usernameOf(request).id) : '';
+      store.transaction(() => {
+        store.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify({ ...current, adminAutoLogin: enabled, adminAutoLoginUserId: userId }));
+        store.audit(usernameOf(request).id, 'admin-auto-login', enabled ? userId : 'disabled');
+      });
+      if (!enabled) autoLogins.clear();
+      service.notify();
+      return { enabled };
+    });
     app.post('/api/settings', async request => {
       const currentSettings = store.settings();
       const settings = settingsSchema.parse(request.body);
@@ -310,7 +384,7 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
       if (settings.adminPort === settings.clientPort) fail(400, '管理端与客户端端口不能相同');
       if (settings.adminPort === 4309 || settings.clientPort === 4309) fail(400, '4309 为本机单实例保护保留端口');
       if (!['127.0.0.1','::1'].includes(settings.clientHost) && !settings.allowInsecureLan) fail(400, '开启内网监听前，请明确确认HTTP风险或配置HTTPS代理');
-      store.transaction(() => { store.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify(settings)); store.audit(usernameOf(request).id, 'settings', 'settings'); }); return { ok: true, restartRequired: true };
+      store.transaction(() => { store.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify({ ...settings, adminAutoLogin: currentSettings.adminAutoLogin, adminAutoLoginUserId: currentSettings.adminAutoLoginUserId })); store.audit(usernameOf(request).id, 'settings', 'settings'); }); return { ok: true, restartRequired: true };
     });
     app.post('/api/settings/probe', async () => probeClaude(store.settings().claudePath));
     app.post('/api/settings/discover', async request => {
@@ -343,9 +417,23 @@ export async function createApp(store: Store, service: Service, portal: 'admin' 
       const bytes = readFileSync(path); const { unlinkSync } = await import('node:fs'); unlinkSync(path);
       reply.header('Content-Disposition', 'attachment; filename="desk-backup.sqlite"'); reply.type('application/octet-stream'); return bytes;
     });
+    app.post('/api/launcher/review-login', async request => {
+      authenticateLauncher(request);
+      if (request.headers.origin) fail(403, '审核登录同步仅允许本机启动器调用');
+      const auto = issueAutoLogin();
+      if (auto) return auto;
+      const now = Date.now();
+      const source = store.db.prepare("SELECT s.token,s.expires FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.portal='admin' AND s.expires>? AND u.enabled=1 AND u.role='admin' ORDER BY s.expires DESC,s.rowid DESC LIMIT 1").get(now) as { token: string; expires: number } | undefined;
+      if (!source) fail(401, '请先登录管理员工作台');
+      for (const [alias, login] of reviewLogins) if (login.expires <= now || !validSession(login.parent)) reviewLogins.delete(alias);
+      // Only one native review window is active; bound abandoned aliases as well.
+      while (reviewLogins.size >= 128) reviewLogins.delete(reviewLogins.keys().next().value!);
+      const sessionToken = token();
+      reviewLogins.set(digest(sessionToken), { parent: source.token, expires: source.expires });
+      return { sessionToken, expires: source.expires };
+    });
     app.get('/api/launcher/events', async request => {
-      const supplied = request.headers['x-launcher-token'];
-      if (!launcherToken || typeof supplied !== 'string' || digest(supplied) !== digest(launcherToken)) fail(401, '启动器认证失败');
+      authenticateLauncher(request);
       const count = (status: string) => (store.db.prepare('SELECT COUNT(*) count FROM questions WHERE status=?').get(status) as any).count;
       let clientUrl: string | null = null;
       try { const connection = JSON.parse(readFileSync(join(store.directory, 'connection.json'), 'utf8')); if (connection.pid === process.pid) clientUrl = connection.clientUrl; } catch { /* service may be starting */ }

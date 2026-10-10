@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-10
+
+### Added
+- 增加“本机管理员免登录”即时保存开关，管理台和审核窗口使用已指定的本机管理员身份，重启后仍生效；关闭时撤销自动访问，客户登录不受影响。
+
+### Fixed
+- 独立审核窗口沿用本机最近一次有效管理员登录，避免浏览器与审核窗口重复登录；同步登录不延长有效期，原登录退出、过期或账号停用后同时失效。
+- Windows 原生执行测试先准备新编译的临时程序，避免首次启动延迟误判 Claude 探测失败，实际程序的探测超时保持不变。
+
+### Security
+- 本机免登录仍验证本机连接与请求来源，后续操作保持正常的会话和 CSRF 校验；客户入口无法获得管理员免登录身份，已停用或降级的管理员不可自动进入。
+
+### Changed
+- 收录新版提醒与点击更新的设计方案；本版本尚未包含更新提醒或自动安装功能。
+
 ## [0.3.0] - 2026-10-10
 
 ### Added
@@ -93,7 +108,8 @@
 - Claude 后台执行使用 `auto`，可见终端按管理员要求使用 `bypassPermissions`；取消与退出时通过 JobObject 清理子进程树。
 - 发行包排除用户数据、环境文件、数据库、token 和 Claude 登录凭证。
 
-[Unreleased]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/ChineseCanFly-wxy/claude-business-desk/compare/v0.1.2...v0.2.1
 [0.2.0]: https://github.com/ChineseCanFly-wxy/claude-business-desk/tree/v0.2.0

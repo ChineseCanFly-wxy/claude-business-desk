@@ -10,16 +10,20 @@ internal sealed record ReviewItem(string Id, string Status, string UpdatedAt)
     public string Key => $"{Id}:{Status}:{UpdatedAt}";
 }
 
+internal sealed record ReviewLogin(string SessionToken, long Expires);
+
 internal sealed class ReviewForm : Form
 {
     private readonly Uri reviewUri;
     private readonly string userDataFolder;
+    private readonly Func<Task<ReviewLogin?>> readLogin;
     private readonly WebView2 webView = new() { Dock = DockStyle.Fill };
 
-    public ReviewForm(Uri reviewUri, string userDataFolder, string status)
+    public ReviewForm(Uri reviewUri, string userDataFolder, string status, Func<Task<ReviewLogin?>> readLogin)
     {
         this.reviewUri = reviewUri;
         this.userDataFolder = userDataFolder;
+        this.readLogin = readLogin;
         Text = status == "pending_question_review" ? "沐雨橙风 · 新问题审核" : "沐雨橙风 · 答案审核";
         TopMost = true;
         MinimumSize = new Size(720, 560);
@@ -38,7 +42,8 @@ internal sealed class ReviewForm : Form
     {
         try
         {
-            // A separate persistent browser profile; launcher.token is never passed here.
+            // The native host copies a cookie linked to the existing admin login.
+            // The launcher secret never enters WebView2 or a navigation URL.
             var environment = await CoreWebView2Environment.CreateAsync(null, userDataFolder);
             if (IsDisposed) return;
             await webView.EnsureCoreWebView2Async(environment);
@@ -65,6 +70,17 @@ internal sealed class ReviewForm : Form
                 }
                 catch (JsonException) { /* Ignore unrelated page messages. */ }
             };
+            var login = await readLogin();
+            if (IsDisposed) return;
+            if (login != null)
+            {
+                var cookie = core.CookieManager.CreateCookie("desk_admin", login.SessionToken, reviewUri.Host, "/");
+                cookie.IsHttpOnly = true;
+                cookie.IsSecure = reviewUri.Scheme == "https";
+                cookie.SameSite = CoreWebView2CookieSameSiteKind.Strict;
+                cookie.Expires = DateTimeOffset.FromUnixTimeMilliseconds(login.Expires).UtcDateTime;
+                core.CookieManager.AddOrUpdateCookie(cookie);
+            }
             core.Navigate(reviewUri.AbsoluteUri);
         }
         catch (WebView2RuntimeNotFoundException)

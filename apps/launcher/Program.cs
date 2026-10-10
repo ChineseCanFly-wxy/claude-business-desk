@@ -136,7 +136,7 @@ internal sealed class TrayContext : ApplicationContext
         activeReview = reviews.Dequeue();
         var item = activeReview;
         var uri = ReviewNotifications.ReviewUri(item, port);
-        var form = new ReviewForm(uri, Path.Combine(data, "launcher-webview"), item.Status);
+        var form = new ReviewForm(uri, Path.Combine(data, "launcher-webview"), item.Status, ReadReviewLogin);
         reviewForm = form;
         form.FormClosed += (_, _) =>
         {
@@ -146,6 +146,29 @@ internal sealed class TrayContext : ApplicationContext
                 dispatcher.BeginInvoke((Action)ShowNextReview);
         };
         form.Show(); // Non-modal: polling and the tray remain responsive.
+    }
+
+    private async Task<ReviewLogin?> ReadReviewLogin()
+    {
+        var currentBackend = backend;
+        try
+        {
+            if (ReadConnection() is not int port) return null;
+            string token = (await File.ReadAllTextAsync(Path.Combine(data, "launcher.token"), Encoding.UTF8)).Trim();
+            if (token.Length == 0) return null;
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{port}/api/launcher/review-login");
+            request.Headers.Add("x-launcher-token", token);
+            using var response = await http.SendAsync(request);
+            if (!response.IsSuccessStatusCode) return null;
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            if (!ReferenceEquals(currentBackend, backend) || currentBackend is not { HasExited: false }) return null;
+            string? sessionToken = json.RootElement.GetProperty("sessionToken").GetString();
+            long expires = json.RootElement.GetProperty("expires").GetInt64();
+            if (sessionToken is not { Length: 64 } || !sessionToken.All(Uri.IsHexDigit) || expires <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) return null;
+            return new ReviewLogin(sessionToken, expires);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or KeyNotFoundException or FormatException or ArgumentException)
+        { Program.Report("审核窗口登录同步暂不可用，请在窗口内登录或稍后重新打开。"); return null; }
     }
 
     private void Start()

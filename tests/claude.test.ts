@@ -127,7 +127,7 @@ test('Claude discovery uses local install directories and PATH, never relative, 
   assert.equal((await discoverClaude([])).path, null);
   assert.equal((await discoverClaude([process.execPath])).path, null, 'an unrelated executable must not be selected');
 });
-test('background native runner completes automatically and rejects nonzero, incomplete and cancelled runs', { skip:process.platform!=='win32',timeout:60000 }, async () => {
+test('background native runner completes automatically and rejects nonzero, incomplete and cancelled runs', { skip:process.platform!=='win32',timeout:120000 }, async () => {
   const base = await mkdtemp(join(tmpdir(),'desk-runner-fixture-'));
   try {
     const source = join(base,'fixture.cs'), executable = join(base,'fixture.exe');
@@ -159,6 +159,11 @@ class Fixture {
     const compiler = join(process.env.SystemRoot!,'Microsoft.NET','Framework64','v4.0.30319','csc.exe');
     const compiled = spawnSync(compiler,['/nologo','/target:exe','/r:System.Web.Extensions.dll',`/out:${executable}`,source],{windowsHide:true,encoding:'utf8',timeout:30000});
     assert.equal(compiled.status,0,compiled.error?.message || compiled.stdout+compiled.stderr);
+    // Windows can delay the first start of a newly compiled Framework fixture.
+    // Warm that test process before exercising the normal CLI probe budget.
+    const ready = spawnSync(executable,['--version'],{windowsHide:true,encoding:'utf8',timeout:60000});
+    assert.equal(ready.status,0,ready.error?.message || ready.stdout+ready.stderr);
+    assert.equal(ready.stdout.trim(),'2.1.99 (Claude Code)');
     const discovered = await discoverClaude([join(base, 'missing.exe'), process.execPath, executable]);
     assert.equal(discovered.path, await realpath(executable)); assert.equal(discovered.version, '2.1.99 (Claude Code)');
     const host = join(process.cwd(),'dist/native/ClaudeTerminalHost.exe');
